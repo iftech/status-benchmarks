@@ -204,22 +204,47 @@ async def send_friend_requests(nodes: NodesInformation,
 
 
 async def accept_friend_requests(nodes: dict[str, StatusBackend], results_queue: asyncio.Queue[CollectedItem | None],
-                                 consumers: int) -> asyncio.Queue[float]:
+                                 consumers: int) -> asyncio.Queue[int]:
     # TODO: This should be activated when the signal is received instead of getting looped
+    def _contains_value(data: Any, expected_value: str) -> bool:
+        if isinstance(data, dict):
+            return any(_contains_value(value, expected_value) for value in data.values())
+        if isinstance(data, list):
+            return any(_contains_value(value, expected_value) for value in data)
+        return data == expected_value
+
     async def _accept_friend_request(queue_result: CollectedItem):
-        max_retries = 40
-        retry_interval = 2
+        max_retries = 2
+        signal_timeout = 60
         function_name, result_entry = queue_result
+        sender_public_key = nodes[result_entry.sender].public_key
 
         for attempt in range(max_retries):
             try:
-                _ = await nodes[result_entry.receiver].wakuext_service.accept_contact_request(result_entry.result)
-                accepted_signal = f"@{nodes[result_entry.receiver].public_key} accepted your contact request"
-                message = await nodes[result_entry.sender].signal.find_signal_containing_string(
+                contact_request_message = await nodes[result_entry.receiver].signal.find_message(
                     SignalType.MESSAGES_NEW.value,
-                    event_string=accepted_signal,
-                    timeout=10)
-                return message[0] - int(result_entry.timestamp) // 1000  # Convert unix milliseconds to seconds
+                    lambda message: (
+                        message.get("contentType") == MessageContentType.CONTACT_REQUEST.value
+                        and _contains_value(message, sender_public_key)
+                    ),
+                    timeout=signal_timeout
+                )
+                contact_request_id = contact_request_message.get("id")
+                if not contact_request_id:
+                    raise ValueError(f"Contact request message missing id: {contact_request_message}")
+
+                _ = await nodes[result_entry.receiver].wakuext_service.accept_contact_request(
+                    contact_request_id,
+                    sender_public_key
+                )
+                accepted_signal_text = f"@{nodes[result_entry.receiver].public_key} accepted your contact request"
+                accepted_signal, _ = await nodes[result_entry.sender].signal.find_message(
+                    SignalType.MESSAGES_NEW.value,
+                    lambda message: accepted_signal_text in (message.get("text") or ""),
+                    timeout=signal_timeout,
+                    include_signal=True,
+                )
+                return int(accepted_signal["timestamp"] * 1000) - int(result_entry.timestamp)
             except Exception as e:
                 logging.error(
                     f"Attempt {attempt + 1}/{max_retries} from {result_entry.sender} to {result_entry.receiver}: "
@@ -227,10 +252,10 @@ async def accept_friend_requests(nodes: dict[str, StatusBackend], results_queue:
                 await asyncio.sleep(2)
 
         raise Exception(
-            f"Failed to accept friend request in {max_retries * retry_interval} seconds."
+            f"Failed to accept friend request after {max_retries} attempts with {signal_timeout}s signal waits."
         )
 
-    delays_queue: asyncio.Queue[float] = asyncio.Queue()
+    delays_queue: asyncio.Queue[int] = asyncio.Queue()
 
     logger.info(f"Accepting friend requests.")
     workers = [asyncio.create_task(
