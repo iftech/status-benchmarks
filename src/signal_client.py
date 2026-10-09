@@ -29,7 +29,9 @@ class BufferedQueue:
     async def put(self, item):
         if item.get("event") is not None and item.get("event").get("messages"):
             for message in item["event"]["messages"]:
-                self.messages.append((item["timestamp"], message["text"]))
+                text = message.get("text")
+                if text is not None:
+                    self.messages.append((item["timestamp"], text))
         self.buffer.append(item)
         await self.queue.put(item)
 
