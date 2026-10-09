@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from typing import Optional, AsyncGenerator, cast
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType
 from pathlib import Path
@@ -154,25 +155,30 @@ class AsyncSignalClient:
     async def wait_for_logout(self) -> dict:
         return await self.wait_for_signal(SignalType.NODE_LOGOUT.value)
 
-    # TODO should be applied to other places
-    async def find_signal_containing_string(self, signal_type: str, event_string: str, timeout: int = 10) \
-            -> Optional[dict]:
+    async def find_message(
+            self,
+            signal_type: str,
+            predicate: Callable[[dict], bool],
+            timeout: int = 10,
+            include_signal: bool = False,
+    ) -> dict | tuple[dict, dict]:
         if signal_type not in self.signal_queues:
             raise ValueError(f"Signal type {signal_type} is not in the list of awaited signals")
 
         queue = self.signal_queues[signal_type]
         end_time = asyncio.get_event_loop().time() + timeout
 
-        # TODO MAKE THIS TO BE TRIGGERED AUTOMATICALLY WHEN MESSAGE APPEARS
         while True:
-            for message in queue.messages:
-                if event_string in message[1]:
-                    # Remove the found signal from the buffer
-                    # queue.buffer.remove(signal)
-                    logger.debug(f"Found {signal_type} containing '{event_string}' in messages")
-                    return message
+            for signal in reversed(queue.recent()):
+                messages = signal.get("event", {}).get("messages", [])
+                for message in reversed(messages):
+                    if predicate(message):
+                        logger.debug(f"Found message in {signal_type}: {message}")
+                        if include_signal:
+                            return signal, message
+                        return message
 
             if asyncio.get_event_loop().time() > end_time:
-                raise TimeoutError(f"{signal_type} containing '{event_string}' not found in {timeout} seconds")
+                raise TimeoutError(f"Matching message in {signal_type} not found in {timeout} seconds")
 
             await asyncio.sleep(0.2)
