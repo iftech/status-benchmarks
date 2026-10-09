@@ -83,7 +83,10 @@ class AsyncSignalClient:
         logger.trace("WebSocket listener started")
         async for msg in self.ws:
             if msg.type == WSMsgType.TEXT:
-                await self.on_message(msg.data)
+                try:
+                    await self.on_message(msg.data)
+                except Exception as e:
+                    logger.exception(f"Error handling WebSocket signal in {self.url}: {e}")
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f"WebSocket error: {self.ws.exception()}")
 
