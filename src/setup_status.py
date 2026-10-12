@@ -239,13 +239,12 @@ async def accept_friend_requests(nodes: dict[str, StatusBackend], results_queue:
                     sender_public_key
                 )
                 accepted_signal_text = f"@{nodes[result_entry.receiver].public_key} accepted your contact request"
-                accepted_signal, _ = await nodes[result_entry.sender].signal.find_message(
+                accepted_message = await nodes[result_entry.sender].signal.find_message(
                     SignalType.MESSAGES_NEW.value,
                     lambda message: accepted_signal_text in (message.get("text") or ""),
                     timeout=signal_timeout,
-                    include_signal=True,
                 )
-                return int(accepted_signal["timestamp"] * 1000) - int(result_entry.timestamp)
+                return int(accepted_message["timestamp"]) - int(result_entry.timestamp)
             except Exception as e:
                 logging.error(
                     f"Attempt {attempt + 1}/{max_retries} from {result_entry.sender} to {result_entry.receiver}: "
