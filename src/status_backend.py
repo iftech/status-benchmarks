@@ -99,7 +99,7 @@ class StatusBackend:
         anvil_network = {
             "ChainID": 31337,
             "ChainName": "Anvil",
-            "Enabled": True,
+            "IsActive": True,
             "IsTest": False,
             "Layer": 1,
             "NativeCurrencyDecimals": 18,

@@ -60,8 +60,8 @@ class WakuextAsyncService(AsyncService):
         json_response = await self.rpc_request("sendContactRequest", params)
         return json_response
 
-    async def accept_contact_request(self, request_id: str) -> dict:
-        params = [{"id": request_id}]
+    async def accept_contact_request(self, request_id: str, contact_id: str) -> dict:
+        params = [{"id": request_id, "contactID": contact_id}]
         json_response = await self.rpc_request("acceptContactRequest", params)
         return json_response
 
