@@ -11,6 +11,7 @@ import src.logger
 from src.benchmark_scenarios.message_delivery import (
     build_delivery_metrics,
     calculate_stagger_between_senders,
+    extract_first_message_id,
     expected_private_delivery_pairs,
     node_type,
     private_delivery_pair,
@@ -45,6 +46,8 @@ class SentPrivateMessage:
     send_order: int
     send_status: str = "pending"
     send_error: str | None = None
+    message_id: str | None = None
+
 
 
 async def _add_pair_contacts(
@@ -77,6 +80,7 @@ async def _send_member_messages(
 
     for sequence in range(num_messages):
         text = private_message_text(run_id, node_name, sequence)
+        response = await node.wakuext_service.send_one_to_one_message(receiver_public_key, text)
         async with sent_messages_lock:
             send_order = len(sent_messages)
             message = SentPrivateMessage(
@@ -89,6 +93,7 @@ async def _send_member_messages(
                 sequence=sequence,
                 sent_at=time.time(),
                 send_order=send_order,
+                message_id=extract_first_message_id(response),
             )
             sent_messages.append(message)
 
