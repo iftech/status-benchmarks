@@ -85,8 +85,17 @@ def private_receiver_type(message: Any, _: str) -> str:
 
 
 def _normalize_signal_timestamp(timestamp: float | int) -> float:
-    if timestamp > 1_000_000_000_000:
-        return timestamp / 1000
+    """Read the envelope's Unix seconds, not the message payload's millisecond timestamp.
+
+    status-go/internal/signal/signals.go:newEnvelope uses time.Now().Unix().
+    Reject values outside years 1970-9999 rather than guessing a different unit.
+    """
+    if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not 0 <= timestamp < 253_402_300_800
+    ):
+        raise ValueError(f"Expected messages.new envelope timestamp in Unix seconds, got {timestamp!r}")
     return float(timestamp)
 
 
@@ -161,6 +170,20 @@ def _latency_distribution(delivery_records: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _index_messages_by_text(sent_messages: list[Any]) -> dict[str, Any]:
+    """Fail explicitly if the queue's text-only matching would be ambiguous."""
+    sent_by_text: dict[str, Any] = {}
+    for message in sent_messages:
+        if message.text in sent_by_text:
+            previous = sent_by_text[message.text]
+            raise ValueError(
+                "Delivery matching requires unique message text: "
+                f"messages {previous.key!r} and {message.key!r} share the same text"
+            )
+        sent_by_text[message.text] = message
+    return sent_by_text
+
+
 def _successful_delivery_pairs(
         sent_messages: list[Any],
         status_nodes: dict[str, StatusBackend],
@@ -168,7 +191,7 @@ def _successful_delivery_pairs(
         expected_pairs: set[DeliveryPair],
         delivery_pair_resolver: DeliveryPairResolver,
 ) -> set[DeliveryPair]:
-    sent_by_text = {message.text: message for message in sent_messages}
+    sent_by_text = _index_messages_by_text(sent_messages)
     successful_pairs: set[DeliveryPair] = set()
 
     for receiver in receivers:
@@ -192,7 +215,7 @@ def _scan_deliveries(
         expected_pairs: set[DeliveryPair],
         delivery_pair_resolver: DeliveryPairResolver,
 ) -> DeliveryScan:
-    sent_by_text = {message.text: message for message in sent_messages}
+    sent_by_text = _index_messages_by_text(sent_messages)
     delivery_counts: dict[DeliveryPair, int] = defaultdict(int)
     first_delivery_at: dict[DeliveryPair, float] = {}
     first_deliveries_by_receiver_sender: dict[tuple[str, str], list[tuple[float, int, int, str]]] = defaultdict(list)
