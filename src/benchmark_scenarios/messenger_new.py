@@ -83,7 +83,7 @@ async def _send_member_messages(
             sent_messages[send_order] = replace(
                 message, send_status="failed", send_error=f"{type(e).__name__}: {e}",
             )
-            logger.error(f"Error sending group message {sequence} from {node_name}: {e}")
+            logger.exception(f"Error sending group message {sequence} from {node_name}: {e}")
         else:
             sent_messages[send_order] = replace(message, send_status="sent")
             if sequence == 0:
@@ -107,8 +107,9 @@ async def send_group_message_new(
     """
     Run a 20-member private group benchmark with 10 relay and 10 light nodes.
 
-    Reliability by node type is grouped by expected recipient type. Each attempted
-    message has 19 expected deliveries, including attempts whose send API call fails.
+    Reliability by node type is grouped by expected recipient type. Each message
+    accepted by the send API has 19 expected deliveries. API failures are reported
+    separately and do not count as lost node-to-node deliveries.
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     # 20-member private group: 10 relay nodes and 10 light nodes.

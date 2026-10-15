@@ -50,18 +50,23 @@ def private_message_text(run_id: str, node_name: str, sequence: int) -> str:
 
 
 def expected_group_delivery_pairs(sent_messages: list[Any], group_members: list[str]) -> set[DeliveryPair]:
-    """Expand every recorded send attempt, including failed sends, to its recipients."""
+    """Expand only sends accepted by the node API to their expected recipients."""
     return {
         (message.key, receiver)
         for message in sent_messages
+        if message.send_status == "sent"
         for receiver in group_members
         if receiver != message.sender
     }
 
 
 def expected_private_delivery_pairs(sent_messages: list[Any]) -> set[DeliveryPair]:
-    """Count an expected delivery for every recorded send attempt."""
-    return {(message.key, message.receiver) for message in sent_messages}
+    """Count an expected delivery only when the node API accepted the send."""
+    return {
+        (message.key, message.receiver)
+        for message in sent_messages
+        if message.send_status == "sent"
+    }
 
 
 def group_delivery_pair(message: Any, receiver: str) -> DeliveryPair | None:
@@ -136,7 +141,7 @@ def _empty_delivery_bucket() -> dict[str, Any]:
         "lost_deliveries": 0,
         "duplicate_deliveries": 0,
         "out_of_order_deliveries": 0,
-        "delivery_reliability_percent": 0.0,
+        "delivery_reliability_percent": None,
         "message_delivery_latency": _latency_summary([]),
     }
 
@@ -327,6 +332,8 @@ def _overall_metrics(
         sent_messages_by_key: dict[str, Any],
         out_of_order_pairs: set[DeliveryPair],
 ) -> dict[str, Any]:
+    messages_attempted = len(sent_messages)
+    messages_sent = sum(message.send_status == "sent" for message in sent_messages)
     expected_deliveries = len(expected_pairs)
     successful_deliveries = len(successful_pairs)
     duplicate_deliveries = sum(max(0, count - 1) for count in delivery_counts.values())
@@ -336,16 +343,17 @@ def _overall_metrics(
     ]
 
     return {
-        "messages_attempted": len(sent_messages),
-        "messages_sent": sum(message.send_status == "sent" for message in sent_messages),
+        "messages_attempted": messages_attempted,
+        "messages_sent": messages_sent,
         "send_failures": sum(message.send_status == "failed" for message in sent_messages),
+        "send_success_rate_percent": messages_sent / messages_attempted * 100 if messages_attempted else None,
         "expected_message_deliveries": expected_deliveries,
         "successful_deliveries": successful_deliveries,
         "lost_deliveries": expected_deliveries - successful_deliveries,
         "duplicate_deliveries": duplicate_deliveries,
         "out_of_order_deliveries": len(out_of_order_pairs),
         "delivery_reliability_percent": (
-            successful_deliveries / expected_deliveries * 100 if expected_deliveries else 0.0
+            successful_deliveries / expected_deliveries * 100 if expected_deliveries else None
         ),
         "message_delivery_latency": _latency_summary(latencies),
     }
@@ -393,7 +401,7 @@ def _metrics_by_receiver_type(
     for receiver_type, bucket in by_node_type.items():
         expected = bucket["expected_message_deliveries"]
         successful = bucket["successful_deliveries"]
-        bucket["delivery_reliability_percent"] = successful / expected * 100 if expected else 0.0
+        bucket["delivery_reliability_percent"] = successful / expected * 100 if expected else None
         bucket["message_delivery_latency"] = _latency_summary(latencies_by_type.get(receiver_type, []))
 
     return by_node_type
@@ -450,6 +458,9 @@ async def wait_for_delivery_progress(
         elapsed = now - started_at
         seconds_since_progress = now - last_progress_at
 
+        if not expected_deliveries:
+            reason = "no_accepted_sends"
+            break
         if successful_deliveries >= expected_deliveries:
             reason = "all_expected_deliveries_observed"
             break
@@ -483,7 +494,12 @@ def build_delivery_metrics(
         delivery_pair_resolver: DeliveryPairResolver,
         receiver_type_resolver: ReceiverTypeResolver,
 ) -> dict[str, Any]:
-    """Measure delivery over all send attempts and report send failures separately."""
+    """Measure delivery of API-accepted sends and report API send success separately.
+
+    API failures do not establish whether a message reached the node (e.g. a response
+    can time out after acceptance). They remain in send diagnostics, outside delivery
+    loss and latency metrics. Rates without an eligible denominator are None.
+    """
     sent_messages_by_key = {message.key: message for message in sent_messages}
     scan = _scan_deliveries(
         sent_messages,

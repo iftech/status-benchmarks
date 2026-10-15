@@ -98,7 +98,7 @@ async def _send_member_messages(
             sent_messages[send_order] = replace(
                 message, send_status="failed", send_error=f"{type(e).__name__}: {e}",
             )
-            logger.error(f"Error sending private message {sequence} from {node_name} to {receiver_name}: {e}")
+            logger.exception(f"Error sending private message {sequence} from {node_name} to {receiver_name}: {e}")
         else:
             sent_messages[send_order] = replace(message, send_status="sent")
             if sequence == 0:
@@ -123,7 +123,8 @@ async def send_one_to_one_message_new(
     Run 10 independent 1:1 private chats with 10 relay and 10 light nodes.
 
     Each member sends one text-only message every 60 seconds for 3 minutes.
-    Every send attempt has one expected delivery, including send API failures.
+    Each API-accepted send has one expected delivery. API failures are reported
+    separately and do not count as lost node-to-node deliveries.
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     status_nodes: dict[str, StatusBackend] = {}
@@ -188,7 +189,7 @@ async def send_one_to_one_message_new(
             quiet_time,
         )
         expected_pairs = expected_private_delivery_pairs(sent_messages)
-        receivers = sorted({message.receiver for message in sent_messages})
+        receivers = sorted({message.receiver for message in sent_messages if message.send_status == "sent"})
         observation = await wait_for_delivery_progress(
             sent_messages,
             status_nodes,
