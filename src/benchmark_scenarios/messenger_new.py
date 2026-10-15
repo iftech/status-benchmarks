@@ -11,6 +11,7 @@ import src.logger
 from src.benchmark_scenarios.message_delivery import (
     build_delivery_metrics,
     calculate_stagger_between_senders,
+    extract_first_message_id,
     expected_group_delivery_pairs,
     group_delivery_pair,
     group_receiver_type,
@@ -46,6 +47,7 @@ class SentGroupMessage:
     send_order: int
     send_status: str = "pending"
     send_error: str | None = None
+    message_id: str | None = None
 
 
 async def _send_member_messages(
@@ -79,14 +81,16 @@ async def _send_member_messages(
 
         try:
             logger.debug(f"Sending group message {sequence} from {node_name}")
-            await node.wakuext_service.send_group_chat_message(group_id, text)
+            response = await node.wakuext_service.send_group_chat_message(group_id, text)
         except Exception as e:
             sent_messages[send_order] = replace(
                 message, send_status="failed", send_error=f"{type(e).__name__}: {e}",
             )
             logger.exception(f"Error sending group message {sequence} from {node_name}: {e}")
         else:
-            sent_messages[send_order] = replace(message, send_status="sent")
+            sent_messages[send_order] = replace(
+                message, send_status="sent", message_id=extract_first_message_id(response),
+            )
             if sequence == 0:
                 logger.info(f"{node_name} successfully began sending {num_messages} group messages")
 
