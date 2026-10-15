@@ -94,8 +94,16 @@ class AsyncSignalClient:
 
     def cleanup_signal_queues(self):
         queue_names = [
-            "messages.new", "message.delivered", "node.ready",
-            "node.started", "node.stopped"
+            SignalType.MESSAGES_NEW.value,
+            SignalType.MESSAGE_DELIVERED.value,
+            SignalType.ENVELOPE_SENT.value,
+            SignalType.ENVELOPE_EXPIRED.value,
+            SignalType.HISTORY_REQUEST_STARTED.value,
+            SignalType.HISTORY_REQUEST_COMPLETED.value,
+            SignalType.LOCAL_NOTIFICATIONS.value,
+            SignalType.NODE_READY.value,
+            SignalType.NODE_STARTED.value,
+            SignalType.NODE_LOGOUT.value,
         ] # All but login, so we can find key uid
 
         if self.signal_queues:

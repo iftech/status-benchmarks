@@ -26,6 +26,11 @@ class MessageContentType(Enum):
 class SignalType(Enum):
     MESSAGES_NEW = "messages.new"
     MESSAGE_DELIVERED = "message.delivered"
+    ENVELOPE_SENT = "envelope.sent"
+    ENVELOPE_EXPIRED = "envelope.expired"
+    HISTORY_REQUEST_STARTED = "history.request.started"
+    HISTORY_REQUEST_COMPLETED = "history.request.completed"
+    LOCAL_NOTIFICATIONS = "local-notifications"
     NODE_READY = "node.ready"
     NODE_STARTED = "node.started"
     NODE_LOGIN = "node.login"
