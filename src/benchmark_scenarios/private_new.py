@@ -23,6 +23,7 @@ from src.benchmark_scenarios.scenario_utils import (
     send_friend_requests_util,
     shutdown_status_nodes,
 )
+from src.plotting import generate_delivery_plots
 from src.setup_status import accept_friend_requests
 from src.status_backend import StatusBackend
 
@@ -118,6 +119,7 @@ async def send_one_to_one_message_new(
         max_delivery_wait: int = 240,
         quiet_time: int = 30,
         poll_interval: float = 5,
+        plots_output_dir: str | None = "plots",
 ) -> dict[str, Any]:
     """
     Run 10 independent 1:1 private chats with 10 relay and 10 light nodes.
@@ -232,6 +234,16 @@ async def send_one_to_one_message_new(
         metrics["sent_messages"] = [
             asdict(message) for message in sent_messages if message.send_status == "sent"
         ]
+        if plots_output_dir:
+            try:
+                metrics["plots"] = generate_delivery_plots(
+                    metrics,
+                    output_dir=plots_output_dir,
+                    prefix=f"private_{run_id}",
+                )
+            except Exception as e:
+                metrics["plots_error"] = str(e)
+                logger.error(f"Failed to generate private delivery plots: {e}")
 
         logger.info("Private chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
         return metrics
