@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 # Project Imports
@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SentGroupMessage:
+    """A send attempt, with sent_at measured before calling the send API."""
+
     key: str
     text: str
     sender: str
@@ -41,6 +43,8 @@ class SentGroupMessage:
     sequence: int
     sent_at: float
     send_order: int
+    send_status: str = "pending"
+    send_error: str | None = None
 
 
 async def _send_member_messages(
@@ -59,29 +63,31 @@ async def _send_member_messages(
 
     for sequence in range(num_messages):
         text = f"GroupBenchmark|run={run_id}|sender={node_name}|seq={sequence}"
+        async with sent_messages_lock:
+            send_order = len(sent_messages)
+            message = SentGroupMessage(
+                key=f"{node_name}:{sequence}",
+                text=text,
+                sender=node_name,
+                sender_type=node_type(node_name),
+                sequence=sequence,
+                sent_at=time.time(),
+                send_order=send_order,
+            )
+            sent_messages.append(message)
+
         try:
             logger.debug(f"Sending group message {sequence} from {node_name}")
             await node.wakuext_service.send_group_chat_message(group_id, text)
-            sent_at = time.time()
-
-            async with sent_messages_lock:
-                send_order = len(sent_messages)
-                sent_messages.append(
-                    SentGroupMessage(
-                        key=f"{node_name}:{sequence}",
-                        text=text,
-                        sender=node_name,
-                        sender_type=node_type(node_name),
-                        sequence=sequence,
-                        sent_at=sent_at,
-                        send_order=send_order,
-                    )
-                )
-
+        except Exception as e:
+            sent_messages[send_order] = replace(
+                message, send_status="failed", send_error=f"{type(e).__name__}: {e}",
+            )
+            logger.error(f"Error sending group message {sequence} from {node_name}: {e}")
+        else:
+            sent_messages[send_order] = replace(message, send_status="sent")
             if sequence == 0:
                 logger.info(f"{node_name} successfully began sending {num_messages} group messages")
-        except Exception as e:
-            logger.error(f"Error sending group message {sequence} from {node_name}: {e}")
 
         if sequence < num_messages - 1:
             await asyncio.sleep(delay_between_messages)
@@ -101,8 +107,8 @@ async def send_group_message_new(
     """
     Run a 20-member private group benchmark with 10 relay and 10 light nodes.
 
-    Reliability by node type is grouped by expected recipient type. Each successfully
-    sent message has 19 expected deliveries, one for every other group member.
+    Reliability by node type is grouped by expected recipient type. Each attempted
+    message has 19 expected deliveries, including attempts whose send API call fails.
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     # 20-member private group: 10 relay nodes and 10 light nodes.
@@ -209,7 +215,10 @@ async def send_group_message_new(
             "quiet_time_seconds": quiet_time,
             "poll_interval_seconds": poll_interval,
         }
-        metrics["sent_messages"] = [asdict(message) for message in sent_messages]
+        metrics["attempted_messages"] = [asdict(message) for message in sent_messages]
+        metrics["sent_messages"] = [
+            asdict(message) for message in sent_messages if message.send_status == "sent"
+        ]
 
         logger.info("Group chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
         return metrics

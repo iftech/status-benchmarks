@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 # Project Imports
@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SentPrivateMessage:
+    """A send attempt, with sent_at measured before calling the send API."""
+
     key: str
     text: str
     sender: str
@@ -40,6 +42,8 @@ class SentPrivateMessage:
     sequence: int
     sent_at: float
     send_order: int
+    send_status: str = "pending"
+    send_error: str | None = None
 
 
 async def _add_pair_contacts(
@@ -72,31 +76,33 @@ async def _send_member_messages(
 
     for sequence in range(num_messages):
         text = private_message_text(run_id, node_name, sequence)
+        async with sent_messages_lock:
+            send_order = len(sent_messages)
+            message = SentPrivateMessage(
+                key=f"{node_name}:{sequence}",
+                text=text,
+                sender=node_name,
+                sender_type=node_type(node_name),
+                receiver=receiver_name,
+                receiver_type=node_type(receiver_name),
+                sequence=sequence,
+                sent_at=time.time(),
+                send_order=send_order,
+            )
+            sent_messages.append(message)
+
         try:
             logger.debug(f"Sending private message {sequence} from {node_name} to {receiver_name}")
             await node.wakuext_service.send_one_to_one_message(receiver_public_key, text)
-            sent_at = time.time()
-
-            async with sent_messages_lock:
-                send_order = len(sent_messages)
-                sent_messages.append(
-                    SentPrivateMessage(
-                        key=f"{node_name}:{sequence}",
-                        text=text,
-                        sender=node_name,
-                        sender_type=node_type(node_name),
-                        receiver=receiver_name,
-                        receiver_type=node_type(receiver_name),
-                        sequence=sequence,
-                        sent_at=sent_at,
-                        send_order=send_order,
-                    )
-                )
-
+        except Exception as e:
+            sent_messages[send_order] = replace(
+                message, send_status="failed", send_error=f"{type(e).__name__}: {e}",
+            )
+            logger.error(f"Error sending private message {sequence} from {node_name} to {receiver_name}: {e}")
+        else:
+            sent_messages[send_order] = replace(message, send_status="sent")
             if sequence == 0:
                 logger.info(f"{node_name} successfully began sending {num_messages} private messages")
-        except Exception as e:
-            logger.error(f"Error sending private message {sequence} from {node_name} to {receiver_name}: {e}")
 
         if sequence < num_messages - 1:
             await asyncio.sleep(delay_between_messages)
@@ -117,6 +123,7 @@ async def send_one_to_one_message_new(
     Run 10 independent 1:1 private chats with 10 relay and 10 light nodes.
 
     Each member sends one text-only message every 60 seconds for 3 minutes.
+    Every send attempt has one expected delivery, including send API failures.
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     status_nodes: dict[str, StatusBackend] = {}
@@ -220,7 +227,10 @@ async def send_one_to_one_message_new(
             "poll_interval_seconds": poll_interval,
             "message_template": "MVDS-TEST | <node> | Seq-<sequence> | Run-<run_id> | deterministic text",
         }
-        metrics["sent_messages"] = [asdict(message) for message in sent_messages]
+        metrics["attempted_messages"] = [asdict(message) for message in sent_messages]
+        metrics["sent_messages"] = [
+            asdict(message) for message in sent_messages if message.send_status == "sent"
+        ]
 
         logger.info("Private chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
         return metrics

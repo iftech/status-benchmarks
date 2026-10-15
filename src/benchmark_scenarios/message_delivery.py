@@ -50,6 +50,7 @@ def private_message_text(run_id: str, node_name: str, sequence: int) -> str:
 
 
 def expected_group_delivery_pairs(sent_messages: list[Any], group_members: list[str]) -> set[DeliveryPair]:
+    """Expand every recorded send attempt, including failed sends, to its recipients."""
     return {
         (message.key, receiver)
         for message in sent_messages
@@ -59,6 +60,7 @@ def expected_group_delivery_pairs(sent_messages: list[Any], group_members: list[
 
 
 def expected_private_delivery_pairs(sent_messages: list[Any]) -> set[DeliveryPair]:
+    """Count an expected delivery for every recorded send attempt."""
     return {(message.key, message.receiver) for message in sent_messages}
 
 
@@ -266,10 +268,17 @@ def _out_of_order_pairs(
 def _missing_delivery_diagnostics(
         missing_pairs: set[DeliveryPair],
         sent_messages_by_key: dict[str, Any],
-) -> dict[str, dict[str, int]]:
+) -> dict[str, Any]:
     missing_by_receiver: dict[str, int] = defaultdict(int)
     missing_by_sender: dict[str, int] = defaultdict(int)
     missing_by_message: dict[str, int] = defaultdict(int)
+    send_failures_by_sender: dict[str, int] = defaultdict(int)
+    send_failures_by_message: dict[str, str] = {}
+
+    for message in sent_messages_by_key.values():
+        if message.send_status == "failed":
+            send_failures_by_sender[message.sender] += 1
+            send_failures_by_message[message.key] = message.send_error
 
     for message_key, receiver in missing_pairs:
         sent_message = sent_messages_by_key[message_key]
@@ -281,6 +290,8 @@ def _missing_delivery_diagnostics(
         "missing_deliveries_by_receiver": dict(sorted(missing_by_receiver.items())),
         "missing_deliveries_by_sender": dict(sorted(missing_by_sender.items())),
         "missing_deliveries_by_message": dict(sorted(missing_by_message.items())),
+        "send_failures_by_sender": dict(sorted(send_failures_by_sender.items())),
+        "send_failures_by_message": dict(sorted(send_failures_by_message.items())),
     }
 
 
@@ -302,7 +313,9 @@ def _overall_metrics(
     ]
 
     return {
-        "messages_sent": len(sent_messages),
+        "messages_attempted": len(sent_messages),
+        "messages_sent": sum(message.send_status == "sent" for message in sent_messages),
+        "send_failures": sum(message.send_status == "failed" for message in sent_messages),
         "expected_message_deliveries": expected_deliveries,
         "successful_deliveries": successful_deliveries,
         "lost_deliveries": expected_deliveries - successful_deliveries,
@@ -447,6 +460,7 @@ def build_delivery_metrics(
         delivery_pair_resolver: DeliveryPairResolver,
         receiver_type_resolver: ReceiverTypeResolver,
 ) -> dict[str, Any]:
+    """Measure delivery over all send attempts and report send failures separately."""
     sent_messages_by_key = {message.key: message for message in sent_messages}
     scan = _scan_deliveries(
         sent_messages,
