@@ -15,17 +15,6 @@ def _load_plotting():
     return plt
 
 
-def create_and_save_boxplot(data: list[int], filename: str, title: str):
-    plt = _load_plotting()
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.boxplot(data, vert=False)
-    ax.set_title(title, fontsize=14)
-    ax.set_xlabel("Values", fontsize=12)
-    fig.savefig(filename, bbox_inches="tight")
-    plt.close(fig)
-
-
 def generate_delivery_plots(
         metrics: dict[str, Any],
         output_dir: str | Path = "plots",
