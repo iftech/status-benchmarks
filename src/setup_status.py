@@ -27,8 +27,19 @@ async def initialize_nodes_application(pod_names: list[str], wakuV2LightClient=F
         try:
             status_backend = StatusBackend(
                 url=f"http://{pod_name}:3333",
-                await_signals=["messages.new", "message.delivered", "node.ready", "node.started", "node.login",
-                               "node.stopped"]
+                await_signals=[
+                    SignalType.MESSAGES_NEW.value,
+                    SignalType.MESSAGE_DELIVERED.value,
+                    SignalType.ENVELOPE_SENT.value,
+                    SignalType.ENVELOPE_EXPIRED.value,
+                    SignalType.HISTORY_REQUEST_STARTED.value,
+                    SignalType.HISTORY_REQUEST_COMPLETED.value,
+                    SignalType.LOCAL_NOTIFICATIONS.value,
+                    SignalType.NODE_READY.value,
+                    SignalType.NODE_STARTED.value,
+                    SignalType.NODE_LOGIN.value,
+                    SignalType.NODE_LOGOUT.value,
+                ]
             )
             await status_backend.start_status_backend()
             await status_backend.create_account_and_login(wakuV2LightClient=wakuV2LightClient)

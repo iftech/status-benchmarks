@@ -48,6 +48,12 @@ def private_message_text(run_id: str, node_name: str, sequence: int) -> str:
         "The quick brown fox jumps over the lazy dog."
     )
 
+def extract_first_message_id(response: dict) -> str | None:
+    messages = response.get("result", {}).get("messages", [])
+    if not messages:
+        return None
+    return messages[0].get("id")
+
 
 def expected_group_delivery_pairs(sent_messages: list[Any], group_members: list[str]) -> set[DeliveryPair]:
     """Expand only sends accepted by the node API to their expected recipients."""
@@ -296,12 +302,14 @@ def _out_of_order_pairs(
 def _missing_delivery_diagnostics(
         missing_pairs: set[DeliveryPair],
         sent_messages_by_key: dict[str, Any],
+        status_nodes: dict[str, StatusBackend],
 ) -> dict[str, Any]:
     missing_by_receiver: dict[str, int] = defaultdict(int)
     missing_by_sender: dict[str, int] = defaultdict(int)
     missing_by_message: dict[str, int] = defaultdict(int)
     send_failures_by_sender: dict[str, int] = defaultdict(int)
     send_failures_by_message: dict[str, str] = {}
+    missing_details = []
 
     for message in sent_messages_by_key.values():
         if message.send_status == "failed":
@@ -313,6 +321,7 @@ def _missing_delivery_diagnostics(
         missing_by_receiver[receiver] += 1
         missing_by_sender[sent_message.sender] += 1
         missing_by_message[message_key] += 1
+        missing_details.append(_missing_delivery_detail(sent_message, receiver, status_nodes))
 
     return {
         "missing_deliveries_by_receiver": dict(sorted(missing_by_receiver.items())),
@@ -320,8 +329,85 @@ def _missing_delivery_diagnostics(
         "missing_deliveries_by_message": dict(sorted(missing_by_message.items())),
         "send_failures_by_sender": dict(sorted(send_failures_by_sender.items())),
         "send_failures_by_message": dict(sorted(send_failures_by_message.items())),
+        "missing_delivery_debug": sorted(
+            missing_details,
+            key=lambda detail: (detail["receiver"], detail["sender"], detail["sequence"]),
+        ),
     }
 
+
+def _missing_delivery_detail(
+        sent_message: Any,
+        receiver: str,
+        status_nodes: dict[str, StatusBackend],
+) -> dict[str, Any]:
+    message_id = getattr(sent_message, "message_id", None)
+
+    return {
+        "message_key": sent_message.key,
+        "message_id": message_id,
+        "sender": sent_message.sender,
+        "sender_type": sent_message.sender_type,
+        "receiver": receiver,
+        "receiver_type": node_type(receiver),
+        "sequence": sent_message.sequence,
+        "sender_envelope_sent": _node_has_signal_containing(
+            status_nodes,
+            sent_message.sender,
+            SignalType.ENVELOPE_SENT,
+            message_id,
+        ),
+        "sender_envelope_expired": _node_has_signal_containing(
+            status_nodes,
+            sent_message.sender,
+            SignalType.ENVELOPE_EXPIRED,
+            message_id,
+        ),
+        "sender_message_delivered": _node_has_signal_containing(
+            status_nodes,
+            sent_message.sender,
+            SignalType.MESSAGE_DELIVERED,
+            message_id,
+        ),
+        "receiver_history_request_started_count": len(_recent_signals(
+            status_nodes,
+            receiver,
+            SignalType.HISTORY_REQUEST_STARTED,
+        )),
+        "receiver_history_request_completed_count": len(_recent_signals(
+            status_nodes,
+            receiver,
+            SignalType.HISTORY_REQUEST_COMPLETED,
+        )),
+        "receiver_local_notification_seen": _node_has_signal_containing(
+            status_nodes,
+            receiver,
+            SignalType.LOCAL_NOTIFICATIONS,
+            sent_message.text,
+        ),
+    }
+
+
+def _node_has_signal_containing(
+        status_nodes: dict[str, StatusBackend],
+        node_name: str,
+        signal_type: SignalType,
+        token: str | None,
+) -> bool:
+    if not token:
+        return False
+    return any(token in str(signal) for signal in _recent_signals(status_nodes, node_name, signal_type))
+
+
+def _recent_signals(
+        status_nodes: dict[str, StatusBackend],
+        node_name: str,
+        signal_type: SignalType,
+) -> list[dict[str, Any]]:
+    queue = status_nodes[node_name].signal.signal_queues.get(signal_type.value)
+    if queue is None:
+        return []
+    return queue.recent()
 
 def _overall_metrics(
         sent_messages: list[Any],
@@ -540,5 +626,6 @@ def build_delivery_metrics(
         "delivery_latency_distribution": _latency_distribution(delivery_records),
         "delivery_latency_distribution_by_receiver_type": _latency_distribution_by_receiver_type(delivery_records),
         "delivery_latency_table": delivery_records,
-        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key),
+        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key, status_nodes),
+
     }
