@@ -32,6 +32,7 @@ class BufferedQueue:
             for message in item["event"]["messages"]:
                 text = message.get("text")
                 if text is not None:
+                    # The envelope timestamp is Unix seconds; message["timestamp"] is a different field.
                     self.messages.append((item["timestamp"], text))
         self.buffer.append(item)
         await self.queue.put(item)

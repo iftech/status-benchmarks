@@ -8,9 +8,11 @@ from typing import List, Callable, Optional, Awaitable
 
 # Project Imports
 import src.logger
+from src import kube_utils
 from src.async_utils import CollectedItem, cleanup_queue_on_event
 from src.setup_status import request_join_nodes_to_community, NodesInformation, \
-    send_friend_requests
+    send_friend_requests, initialize_nodes_application
+from src.status_backend import StatusBackend
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,64 @@ class CommunitySetupResult:
     community_id: str
     chat_id: str
     join_delays: list[float]
+
+
+@dataclass(frozen=True)
+class RelayLightNodes:
+    relay_nodes: dict[str, StatusBackend]
+    light_nodes: dict[str, StatusBackend]
+    status_nodes: dict[str, StatusBackend]
+    relay_members: list[str]
+    light_members: list[str]
+
+
+async def initialize_relay_light_nodes(
+        relay_count: int,
+        light_count: int,
+        namespace: str = "status-go-test",
+        init_wait_seconds: int = 30,
+) -> RelayLightNodes:
+    kube_utils.setup_kubernetes_client()
+    backend_relay_pods = kube_utils.get_pods("status-backend-relay", namespace)
+    backend_light_pods = kube_utils.get_pods("status-backend-light", namespace)
+
+    relay_nodes, light_nodes = await asyncio.gather(
+        initialize_nodes_application(backend_relay_pods[:relay_count]),
+        initialize_nodes_application(backend_light_pods[:light_count], wakuV2LightClient=True),
+    )
+    status_nodes = {**relay_nodes, **light_nodes}
+
+    if init_wait_seconds:
+        logger.info(f"Waiting {init_wait_seconds} seconds after nodes initialization")
+        await asyncio.sleep(init_wait_seconds)
+
+    relay_members = sorted(relay_nodes.keys())[:relay_count]
+    light_members = sorted(light_nodes.keys())[:light_count]
+
+    if len(relay_members) != relay_count or len(light_members) != light_count:
+        raise RuntimeError(
+            f"Expected {relay_count} relay and {light_count} light nodes, "
+            f"got {len(relay_members)} relay and {len(light_members)} light"
+        )
+
+    return RelayLightNodes(
+        relay_nodes=relay_nodes,
+        light_nodes=light_nodes,
+        status_nodes=status_nodes,
+        relay_members=relay_members,
+        light_members=light_members,
+    )
+
+
+async def shutdown_status_nodes(status_nodes: dict[str, StatusBackend]) -> None:
+    if not status_nodes:
+        return
+
+    logger.info("Shutting down node connections")
+    await asyncio.gather(
+        *[node.shutdown() for node in status_nodes.values()],
+        return_exceptions=True,
+    )
 
 
 async def create_community_util(status_nodes: NodesInformation, owner: str, to_include: List[str],
