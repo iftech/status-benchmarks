@@ -27,6 +27,7 @@ from src.setup_status import (
     add_contacts,
     create_group_chat,
 )
+from src.plotting import generate_delivery_plots
 from src.status_backend import StatusBackend
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ async def send_group_message_new(
         max_delivery_wait: int = 240,
         quiet_time: int = 30,
         poll_interval: float = 5,
+        plots_output_dir: str | None = "plots",
 ) -> dict[str, Any]:
     """
     Run a 20-member private group benchmark with 10 relay and 10 light nodes.
@@ -220,6 +222,16 @@ async def send_group_message_new(
         metrics["sent_messages"] = [
             asdict(message) for message in sent_messages if message.send_status == "sent"
         ]
+        if plots_output_dir:
+            try:
+                metrics["plots"] = generate_delivery_plots(
+                    metrics,
+                    output_dir=plots_output_dir,
+                    prefix=f"group_{run_id}",
+                )
+            except Exception as e:
+                metrics["plots_error"] = str(e)
+                logger.error(f"Failed to generate group delivery plots: {e}")
 
         logger.info("Group chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
         return metrics
