@@ -287,14 +287,23 @@ def _delivery_records(
 def _out_of_order_pairs(
         first_deliveries_by_receiver_sender: dict[tuple[str, str], list[tuple[float, int, int, str]]],
 ) -> set[DeliveryPair]:
+    """Count inversions distinguishable by application emission timestamp.
+
+    messages.new arrays have no ordering contract, and their timestamps have
+    one-second precision. Equal timestamps cannot establish delivery order.
+    """
     out_of_order: set[DeliveryPair] = set()
 
     for (receiver, _), deliveries in first_deliveries_by_receiver_sender.items():
+        by_timestamp: dict[float, list[tuple[int, str]]] = defaultdict(list)
+        for received_at, _, sequence, message_key in deliveries:
+            by_timestamp[received_at].append((sequence, message_key))
         max_seen_sequence = -1
-        for _, _, sequence, message_key in sorted(deliveries):
-            if sequence < max_seen_sequence:
-                out_of_order.add((message_key, receiver))
-            max_seen_sequence = max(max_seen_sequence, sequence)
+        for _, batch in sorted(by_timestamp.items()):
+            for sequence, message_key in batch:
+                if sequence < max_seen_sequence:
+                    out_of_order.add((message_key, receiver))
+            max_seen_sequence = max(max_seen_sequence, max(sequence for sequence, _ in batch))
 
     return out_of_order
 
@@ -627,5 +636,10 @@ def build_delivery_metrics(
         "delivery_latency_distribution_by_receiver_type": _latency_distribution_by_receiver_type(delivery_records),
         "delivery_latency_table": delivery_records,
         "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key, status_nodes),
+        "delivery_order_measurement": {
+            "basis": "first application signal emission timestamp, with one-second precision",
+            "equal_timestamp_order": "unknown; response-array order is not used",
+            "limitation": "out_of_order_deliveries counts only inversions across distinct timestamps",
+        },
 
     }
