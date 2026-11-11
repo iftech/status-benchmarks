@@ -20,8 +20,8 @@ spec:
           - status-service-bootstrap.status-go-test.svc.cluster.local
       containers:
         - name: waku
-          image: soutullostatus/nwaku-jq-curl:v0.34.0-rc1
-          imagePullPolicy: IfNotPresent
+          image: albertodst/nwaku:v0.39.0
+          imagePullPolicy: Always
           readinessProbe:
             exec:
               command:
@@ -52,5 +52,4 @@ spec:
             - sh
             - -c
             - |
-              /usr/bin/wakunode --rest=true --rest-address=0.0.0.0 --peer-exchange=true --relay=true --filter=true --lightpush=true --max-connections=500 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --nat=extip:$IP --cluster-id=16 --shard=32 --shard=64
-
+              /usr/bin/logosdeliverynode --rest=true --rest-admin=true --rest-address=0.0.0.0 --peer-exchange=true --relay=false --max-connections=500 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --nat=extip:$IP --cluster-id=16 --shard=32 --shard=64

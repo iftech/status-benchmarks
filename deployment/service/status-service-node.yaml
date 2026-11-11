@@ -4,7 +4,7 @@ metadata:
   name: status-service-node
   namespace: status-go-test
 spec:
-  replicas: 1
+  replicas: 5
   podManagementPolicy: "Parallel"
   serviceName: status-service-node
   selector:
@@ -22,6 +22,8 @@ spec:
         - name: enr-data
           emptyDir: {}
         - name: postgres-data
+          emptyDir: {}
+        - name: postgres-ready
           emptyDir: {}
       initContainers:
         - name: grabenr
@@ -42,6 +44,8 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-ready
+              mountPath: /var/run/postgres-ready
           env:
             - name: POSTGRES_DB
               value: wakumessages
@@ -57,19 +61,27 @@ spec:
                 - sh
                 - -c
                 - |
-                  pg_isready -U wakuuser -d wakumessages
+                  if pg_isready -h 127.0.0.1 -p 5432 -U wakuuser -d wakumessages; then
+                    touch /var/run/postgres-ready/ready
+                  else
+                    rm -f /var/run/postgres-ready/ready
+                    exit 1
+                  fi
             initialDelaySeconds: 5
             periodSeconds: 2
             timeoutSeconds: 5
         - name: waku
-          image: soutullostatus/nwaku-jq-curl:v0.34.0-rc1
-          imagePullPolicy: IfNotPresent
+          image: albertodst/nwaku:v0.39.0
+          imagePullPolicy: Always
           ports:
             - containerPort: 8645
             - containerPort: 8008
           volumeMounts:
             - name: enr-data
               mountPath: /etc/enr
+            - name: postgres-ready
+              mountPath: /var/run/postgres-ready
+              readOnly: true
           readinessProbe:
             exec:
               command:
@@ -101,4 +113,9 @@ spec:
             - |
               . /etc/enr/ENR
               echo ENRs are $ENR1 $ENR2 $ENR3
-              nice -n 19 /usr/bin/wakunode --relay=true --peer-exchange=true --lightpush=true --filter=true --store=true --store-message-db-url=${POSTGRES_URL} --max-connections=800 --rest=true --rest-admin=true --rest-address=0.0.0.0 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --discv5-bootstrap-node=$ENR1 --discv5-bootstrap-node=$ENR2 --discv5-bootstrap-node=$ENR3 --cluster-id=16 --shard=32 --shard=64
+              until [ -f /var/run/postgres-ready/ready ]; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+
+              /usr/bin/logosdeliverynode --relay=true --peer-exchange=true --lightpush=false --nat=extip:$IP --filter=false --store=true --store-message-db-url=${POSTGRES_URL} --max-connections=800 --rest=true --rest-admin=true --rest-address=0.0.0.0 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --discv5-bootstrap-node=$ENR1 --discv5-bootstrap-node=$ENR2 --discv5-bootstrap-node=$ENR3 --cluster-id=16 --shard=32 --shard=64
