@@ -1,10 +1,12 @@
 # Python Imports
 import asyncio
+import json
 import logging
 import statistics
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 # Project Imports
@@ -641,5 +643,161 @@ def build_delivery_metrics(
             "equal_timestamp_order": "unknown; response-array order is not used",
             "limitation": "out_of_order_deliveries counts only inversions across distinct timestamps",
         },
-
     }
+
+
+def _summarize_counts(counts: dict, limit: int = 5) -> str:
+    """Keep console output bounded even when many nodes or routes are affected."""
+    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    summary = ", ".join(f"{name}={count}" for name, count in items[:limit])
+    if len(items) > limit:
+        summary += f" (+{len(items) - limit} more)"
+    return summary or "none"
+
+
+def report_delivery_results(metrics: dict, label: str, output_dir: str, prefix: str) -> None:
+    """Save complete results and log only totals, problem locations, and paths."""
+    try:
+        destination = Path(output_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        metrics_path = (destination / f"{prefix}_metrics.json").resolve()
+        metrics["metrics_file"] = str(metrics_path)
+        metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as error:
+        metrics.pop("metrics_file", None)
+        metrics["metrics_file_error"] = str(error)
+        logger.error("%s: cannot save metrics in %s: %s", label, output_dir, error)
+
+    overall = metrics["overall"]
+    has_delivery_issues = any(overall[key] for key in (
+        "send_failures", "lost_deliveries", "duplicate_deliveries", "out_of_order_deliveries",
+    ))
+    logger.log(
+        logging.WARNING if has_delivery_issues else logging.INFO,
+        "%s result: sends=%s/%s; deliveries=%s/%s; send_failures=%s; missing=%s; duplicates=%s; out_of_order=%s",
+        label, overall["messages_sent"], overall["messages_attempted"],
+        overall["successful_deliveries"], overall["expected_message_deliveries"],
+        overall["send_failures"], overall["lost_deliveries"],
+        overall["duplicate_deliveries"], overall["out_of_order_deliveries"],
+    )
+    diagnostics = metrics["delivery_diagnostics"]
+    if overall["send_failures"]:
+        logger.warning("%s API send failures by sender: %s", label,
+                       _summarize_counts(diagnostics["send_failures_by_sender"]))
+    if overall["lost_deliveries"]:
+        logger.warning(
+            "%s missing deliveries at observation end (%s): receivers: %s; senders: %s",
+            label, metrics["observation"]["reason"],
+            _summarize_counts(diagnostics["missing_deliveries_by_receiver"]),
+            _summarize_counts(diagnostics["missing_deliveries_by_sender"]),
+        )
+
+    slow = [row for row in metrics["delivery_latency_table"] if row["latency_seconds"] > 10]
+    if slow:
+        logger.warning(
+            "%s: %s deliveries took over 10s (max=%.2fs); affected routes: %s",
+            label, len(slow), max(row["latency_seconds"] for row in slow),
+            _summarize_counts(Counter(f"{row['sender']} -> {row['receiver']}" for row in slow)),
+        )
+
+    trace = metrics.get("delivery_trace")
+    if trace is not None:
+        retry_summary = trace.get("publication_retry_summary", {})
+        if retry_summary.get("scheduled_retries"):
+            logger.info(
+                "%s LightPush retries: scheduled=%s; recovered_publications=%s; failed_after_retry=%s",
+                label, retry_summary["scheduled_retries"], retry_summary["recovered_publications"],
+                retry_summary["failed_publications_after_retry"],
+            )
+        stream_issues = defaultdict(list)
+        for node, stream in sorted(trace["collection"].items()):
+            if stream["status"] != "collected":
+                stream_issues[stream["status"]].append(node)
+        for status, nodes in sorted(stream_issues.items()):
+            names = ", ".join(nodes[:5])
+            if len(nodes) > 5:
+                names += f" (+{len(nodes) - 5} more)"
+            logger.warning("%s diagnostics %s on %s node(s): %s; inspect collection in the trace report",
+                           label, status, len(nodes), names)
+        if "unavailable" in stream_issues:
+            logger.warning("%s: verify the deployed status-go image supports message.trace and STATUS_MESSAGE_TRACE=1",
+                           label)
+
+        findings = defaultdict(Counter)
+        filter_summary = trace.get("filter_summary", {})
+        for reason, nodes in sorted(filter_summary.get("client_rejections_by_reason", {}).items()):
+            logger.warning("%s Filter client rejection: %s; events=%s; nodes: %s",
+                           label, reason, sum(nodes.values()), _summarize_counts(nodes))
+        if filter_summary.get("push_failures_by_relay"):
+            logger.warning("%s Filter push failures by relay: %s", label,
+                           _summarize_counts(filter_summary["push_failures_by_relay"]))
+        ack_summary = trace.get("mvds_ack_summary", {})
+        schedule_summary = trace.get("mvds_schedule_summary", {})
+        schedule_nodes = schedule_summary.get("nodes_with_schedule_tracing", [])
+        unavailable_schedule_nodes = sorted(set(trace["collection"]) - set(schedule_nodes))
+        if unavailable_schedule_nodes:
+            logger.info("%s MVDS scheduling tracing unavailable on %s node(s): %s; deploy trace version 4",
+                        label, len(unavailable_schedule_nodes), ", ".join(unavailable_schedule_nodes[:5]))
+        if schedule_summary.get("supported"):
+            online = schedule_summary.get("peer_online_notifications_by_reason", {})
+            logger.info("%s MVDS scheduling: online_notifications=%s; online_refreshes_ignored=%s; stale_online_notifications=%s; reset_operations=%s; reset_states=%s",
+                        label, sum(online.get("queued", {}).values()),
+                        sum(online.get("already_online", {}).values()), sum(online.get("stale_event", {}).values()),
+                        sum(schedule_summary.get("reset_operations_by_node", {}).values()),
+                        sum(schedule_summary.get("reset_state_observations_by_node", {}).values()))
+            for nodes, description in (
+                    (online.get("queue_full", {}), "MVDS online notification queue drops"),
+                    (schedule_summary.get("operation_failures_by_node", {}), "MVDS scheduling operation failures")):
+                if nodes:
+                    logger.warning("%s %s: %s", label, description, _summarize_counts(nodes))
+        if ack_summary.get("repeated_message_recipient_pairs"):
+            unavailable_filter_nodes = sorted(set(trace["collection"]) - set(filter_summary.get("nodes_with_filter_tracing", [])))
+            if unavailable_filter_nodes:
+                logger.info("%s Filter tracing unavailable on %s node(s): %s; rebuild both roles with trace version 3",
+                            label, len(unavailable_filter_nodes), ", ".join(unavailable_filter_nodes[:5]))
+        if ack_summary.get("supported"):
+            for key, description in (("queue_drops_by_node", "MVDS input queue drops"),
+                                     ("queue_skips_by_node", "MVDS input packets skipped"),
+                                     ("state_remove_errors_by_node", "MVDS pending-state removal errors")):
+                if ack_summary.get(key):
+                    logger.warning("%s %s: %s", label, description, _summarize_counts(ack_summary[key]))
+        elif ack_summary.get("repeated_message_recipient_pairs"):
+            logger.info("%s: ACK tracing unavailable; rebuild status-go with MVDS ACK instrumentation", label)
+        for row in trace["deliveries"]:
+            classification = row["classification"]
+            route = f"{row['sender']} -> {row['receiver']}"
+            if classification != "delivery_observed":
+                findings[classification][route] += 1
+            elif row["failed_send_attempts_observed"]:
+                findings["send_attempt_errors_before_delivery"][route] += 1
+            ack_trace = row.get("ack_trace", {})
+            for finding in row.get("mvds_schedule", {}).get("findings", []):
+                findings["mvds_schedule: " + finding][route] += 1
+            if row["mvds_retry_candidate"] and ack_trace.get("supported"):
+                findings[f"mvds_retry: {ack_trace['status_before_first_retry']}"][route] += 1
+            elif row["mvds_retry_candidate"] and ack_summary.get("supported"):
+                findings["mvds_retry: ack_trace_unavailable"][route] += 1
+            filter_findings = set()
+            if row["attempts"]:
+                for envelope in row["attempts"][0]["envelopes"]:
+                    evidence = envelope.get("filter_trace", {})
+                    if evidence.get("supported") and evidence.get("applicable") and evidence.get("status") != "receive_hook_observed":
+                        filter_findings.add("data_filter: " + evidence["status"])
+            for message in ack_trace.get("messages", []):
+                if not message["before_retries"]:
+                    continue
+                for publication in message["before_retries"][0].get("ack_publications", []):
+                    for envelope in publication["envelopes"]:
+                        evidence = envelope.get("filter_trace", {})
+                        if evidence.get("supported") and evidence.get("applicable") and evidence.get("status") != "receive_hook_observed":
+                            filter_findings.add("ack_filter: " + evidence["status"])
+            for classification in filter_findings:
+                findings[classification][route] += 1
+        for classification, routes in sorted(findings.items()):
+            logger.warning("%s diagnostic finding: %s; message/recipient pairs=%s; affected routes: %s",
+                           label, classification, sum(routes.values()), _summarize_counts(routes))
+        if not trace.get("artifact_error") and trace.get("report_file"):
+            logger.info("%s trace report: %s; events: %s", label, trace["report_file"], trace["events_file"])
+
+    if metrics.get("metrics_file"):
+        logger.info("%s full results: %s", label, metrics["metrics_file"])

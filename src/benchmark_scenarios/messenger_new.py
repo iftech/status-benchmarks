@@ -1,6 +1,5 @@
 # Python Imports
 import asyncio
-import json
 import logging
 import time
 from dataclasses import asdict, dataclass, replace
@@ -16,6 +15,7 @@ from src.benchmark_scenarios.message_delivery import (
     group_delivery_pair,
     group_receiver_type,
     node_type,
+    report_delivery_results,
     wait_for_delivery_progress,
 )
 from src.benchmark_scenarios.scenario_utils import (
@@ -29,6 +29,7 @@ from src.setup_status import (
     create_group_chat,
 )
 from src.plotting import generate_delivery_plots
+from src.delivery_trace import collect_delivery_trace
 from src.status_backend import StatusBackend
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,8 @@ async def send_group_message_new(
         quiet_time: int = 30,
         poll_interval: float = 5,
         plots_output_dir: str | None = "plots",
+        trace_output_dir: str | None = "logs/delivery-traces",
+        namespace: str = "status-go-test",
 ) -> dict[str, Any]:
     """
     Run a 20-member private group benchmark with 10 relay and 10 light nodes.
@@ -123,7 +126,7 @@ async def send_group_message_new(
     status_nodes: dict[str, StatusBackend] = {}
 
     try:
-        initialized_nodes = await initialize_relay_light_nodes(relay_count=10, light_count=10)
+        initialized_nodes = await initialize_relay_light_nodes(relay_count=10, light_count=10, namespace=namespace)
         status_nodes = initialized_nodes.status_nodes
         relay_members = initialized_nodes.relay_members
         light_members = initialized_nodes.light_members
@@ -154,6 +157,7 @@ async def send_group_message_new(
             node.signal.cleanup_signal_queues()
 
         run_id = str(int(time.time() * 1000))
+        trace_started_at = time.time()
         sent_messages: list[SentGroupMessage] = []
         sent_messages_lock = asyncio.Lock()
         initial_delay_step = calculate_stagger_between_senders(
@@ -206,6 +210,12 @@ async def send_group_message_new(
             group_delivery_pair,
             group_receiver_type,
         )
+        if trace_output_dir is not None:
+            metrics["delivery_trace"] = await collect_delivery_trace(
+                sent_messages, status_nodes, expected_pairs, metrics["delivery_latency_table"],
+                since=trace_started_at, until=time.time(), output_dir=trace_output_dir,
+                prefix=f"group_{run_id}", namespace=namespace,
+            )
         metrics["observation"] = observation
         metrics["scenario"] = {
             "name": "20-member group chat, half relay half light",
@@ -237,7 +247,10 @@ async def send_group_message_new(
                 metrics["plots_error"] = str(e)
                 logger.error(f"Failed to generate group delivery plots: {e}")
 
-        logger.info("Group chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
+        report_delivery_results(
+            metrics, "Group chat", output_dir=trace_output_dir or "logs/delivery-results",
+            prefix=f"group_{run_id}",
+        )
         return metrics
     finally:
         await shutdown_status_nodes(status_nodes)
