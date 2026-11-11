@@ -104,7 +104,7 @@ async def _send_member_messages(
 async def send_group_message_new(
         consumers: int = 4,
         num_messages: int = 3,
-        delay_between_messages: float = 60,
+        delay_between_messages: float = 5,
         settle_time: int = 120,
         max_delivery_wait: int = 240,
         quiet_time: int = 30,
@@ -122,7 +122,7 @@ async def send_group_message_new(
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     # 20-member private group: 10 relay nodes and 10 light nodes.
-    # Every member sends one message every 60 seconds for 3 minutes.
+    # Each member pauses delay_between_messages seconds between send API calls.
     status_nodes: dict[str, StatusBackend] = {}
 
     try:
