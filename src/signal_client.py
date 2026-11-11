@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 from collections.abc import Callable
 from typing import Optional, AsyncGenerator, cast
 from aiohttp import ClientSession, ClientWebSocketResponse, WSMsgType
@@ -22,10 +23,11 @@ SIGNALS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class BufferedQueue:
-    def __init__(self, max_size: int = 200):
+    def __init__(self, max_size: int = 200, retain_history: bool = False):
         self.queue = asyncio.Queue()
         self.buffer = deque(maxlen=max_size)
         self.messages = []
+        self.history = [] if retain_history else None
 
     async def put(self, item):
         if item.get("event") is not None and item.get("event").get("messages"):
@@ -35,6 +37,8 @@ class BufferedQueue:
                     # The envelope timestamp is Unix seconds; message["timestamp"] is a different field.
                     self.messages.append((item["timestamp"], text))
         self.buffer.append(item)
+        if self.history is not None:
+            self.history.append(item)
         await self.queue.put(item)
 
     async def get(self):
@@ -42,6 +46,9 @@ class BufferedQueue:
 
     def recent(self) -> list:
         return list(self.buffer)
+
+    def all_signals(self) -> list:
+        return list(self.history) if self.history is not None else self.recent()
 
 
 class AsyncSignalClient:
@@ -54,7 +61,15 @@ class AsyncSignalClient:
         self.listener_task = None
 
         self.signal_queues: dict[str, BufferedQueue] = {
-            signal: BufferedQueue(max_size=buffer_size) for signal in self.await_signals
+            signal: BufferedQueue(
+                max_size=buffer_size,
+                retain_history=signal in {
+                    SignalType.ENVELOPE_SENT.value,
+                    SignalType.ENVELOPE_EXPIRED.value,
+                    SignalType.MESSAGE_DELIVERED.value,
+                    SignalType.MESSAGE_TRACE.value,
+                },
+            ) for signal in self.await_signals
         }
 
         if LOG_SIGNALS_TO_FILE: # Not being used currently
@@ -98,6 +113,7 @@ class AsyncSignalClient:
             SignalType.MESSAGE_DELIVERED.value,
             SignalType.ENVELOPE_SENT.value,
             SignalType.ENVELOPE_EXPIRED.value,
+            SignalType.MESSAGE_TRACE.value,
             SignalType.HISTORY_REQUEST_STARTED.value,
             SignalType.HISTORY_REQUEST_COMPLETED.value,
             SignalType.LOCAL_NOTIFICATIONS.value,
@@ -112,12 +128,16 @@ class AsyncSignalClient:
                 if queue and isinstance(queue, BufferedQueue):
                     queue.buffer.clear()
                     queue.messages.clear()
+                    if queue.history is not None:
+                        queue.history.clear()
                     logger.debug(f"Cleaned queue: {queue_name}")
 
         logger.debug("Specified signal queues have been cleaned up.")
 
     async def on_message(self, signal: str):
         signal_data = json.loads(signal)
+        if signal_data.get("type") == SignalType.MESSAGE_TRACE.value:
+            signal_data["_received_at"] = time.time()
         logger.trace(f"Received WebSocket message: {signal_data}")
 
         if LOG_SIGNALS_TO_FILE:

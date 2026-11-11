@@ -28,6 +28,7 @@ class SignalType(Enum):
     MESSAGE_DELIVERED = "message.delivered"
     ENVELOPE_SENT = "envelope.sent"
     ENVELOPE_EXPIRED = "envelope.expired"
+    MESSAGE_TRACE = "message.trace"
     HISTORY_REQUEST_STARTED = "history.request.started"
     HISTORY_REQUEST_COMPLETED = "history.request.completed"
     LOCAL_NOTIFICATIONS = "local-notifications"

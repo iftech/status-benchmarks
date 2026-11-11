@@ -416,7 +416,7 @@ def _recent_signals(
     queue = status_nodes[node_name].signal.signal_queues.get(signal_type.value)
     if queue is None:
         return []
-    return queue.recent()
+    return queue.all_signals() if hasattr(queue, "all_signals") else queue.recent()
 
 def _overall_metrics(
         sent_messages: list[Any],
