@@ -27,6 +27,7 @@ from src.benchmark_scenarios.scenario_utils import (
     shutdown_status_nodes,
 )
 from src.plotting import generate_delivery_plots
+from src.delivery_trace import collect_delivery_trace
 from src.setup_status import accept_friend_requests
 from src.status_backend import StatusBackend
 
@@ -128,6 +129,7 @@ async def send_one_to_one_message_new(
         quiet_time: int = 30,
         poll_interval: float = 5,
         plots_output_dir: str | None = "plots",
+        trace_output_dir: str | None = None,
         namespace: str = "status-go-test",
         results_output_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -174,7 +176,8 @@ async def send_one_to_one_message_new(
 
         run_id = str(int(time.time() * 1000))
         for node in status_nodes.values():
-            node.signal.start_delivery_recording(run_id)
+            node.signal.start_delivery_recording(run_id, diagnostics=trace_output_dir is not None)
+        trace_started_at = time.time()
         sent_messages: list[SentPrivateMessage] = []
         sent_messages_lock = asyncio.Lock()
         initial_delay_step = calculate_stagger_between_senders(delay_between_messages, len(participants))
@@ -227,6 +230,12 @@ async def send_one_to_one_message_new(
             private_delivery_pair,
             private_receiver_type,
         )
+        if trace_output_dir is not None:
+            metrics["delivery_trace"] = await collect_delivery_trace(
+                sent_messages, status_nodes, expected_pairs, metrics["delivery_latency_table"],
+                since=trace_started_at, until=time.time(), output_dir=trace_output_dir,
+                prefix=f"private_{run_id}", namespace=namespace,
+            )
         metrics["observation"] = observation
         metrics["send_cadence"] = build_send_cadence_summary(cadence_by_node)
         metrics["scenario"] = {
@@ -234,6 +243,7 @@ async def send_one_to_one_message_new(
             "namespace": namespace,
             "name": "10 independent 1:1 private chats, half relay half light",
             "message_length_characters": 100,
+            "diagnostics_enabled": trace_output_dir is not None,
             "pairs": [{"relay": relay, "light": light} for relay, light in pairs],
             "participants": participants,
             "relay_members": relay_members,
@@ -264,7 +274,7 @@ async def send_one_to_one_message_new(
                 logger.error(f"Failed to generate private delivery plots: {e}")
 
         report_delivery_results(
-            metrics, "Private chat", output_dir=results_output_dir or "logs/delivery-results",
+            metrics, "Private chat", output_dir=results_output_dir or trace_output_dir or "logs/delivery-results",
             prefix=f"private_{run_id}",
         )
         return metrics

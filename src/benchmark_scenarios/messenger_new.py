@@ -32,6 +32,7 @@ from src.setup_status import (
     create_group_chat,
 )
 from src.plotting import generate_delivery_plots
+from src.delivery_trace import collect_delivery_trace
 from src.status_backend import StatusBackend
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ async def send_group_message_new(
         quiet_time: int = 30,
         poll_interval: float = 5,
         plots_output_dir: str | None = "plots",
+        trace_output_dir: str | None = None,
         namespace: str = "status-go-test",
         results_output_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -162,7 +164,8 @@ async def send_group_message_new(
 
         run_id = str(int(time.time() * 1000))
         for node in status_nodes.values():
-            node.signal.start_delivery_recording(run_id)
+            node.signal.start_delivery_recording(run_id, diagnostics=trace_output_dir is not None)
+        trace_started_at = time.time()
         sent_messages: list[SentGroupMessage] = []
         sent_messages_lock = asyncio.Lock()
         initial_delay_step = calculate_stagger_between_senders(
@@ -217,6 +220,12 @@ async def send_group_message_new(
             group_delivery_pair,
             group_receiver_type,
         )
+        if trace_output_dir is not None:
+            metrics["delivery_trace"] = await collect_delivery_trace(
+                sent_messages, status_nodes, expected_pairs, metrics["delivery_latency_table"],
+                since=trace_started_at, until=time.time(), output_dir=trace_output_dir,
+                prefix=f"group_{run_id}", namespace=namespace,
+            )
         metrics["observation"] = observation
         metrics["send_cadence"] = build_send_cadence_summary(cadence_by_node)
         metrics["scenario"] = {
@@ -225,6 +234,7 @@ async def send_group_message_new(
             "name": "20-member group chat, half relay half light",
             "message_length_characters": 100,
             "message_template": "MVDS-TEST | <sender> | Seq-<sequence:06d> | Run-<run_id> | deterministic text",
+            "diagnostics_enabled": trace_output_dir is not None,
             "group_id": group_id,
             "members": group_members,
             "relay_members": relay_members,
@@ -254,7 +264,7 @@ async def send_group_message_new(
                 logger.error(f"Failed to generate group delivery plots: {e}")
 
         report_delivery_results(
-            metrics, "Group chat", output_dir=results_output_dir or "logs/delivery-results",
+            metrics, "Group chat", output_dir=results_output_dir or trace_output_dir or "logs/delivery-results",
             prefix=f"group_{run_id}",
         )
         return metrics
