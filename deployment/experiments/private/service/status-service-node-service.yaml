@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: status-service-node
+  namespace: status-bench-private
+spec:
+  clusterIP: None
+  selector:
+    app: status-service-node

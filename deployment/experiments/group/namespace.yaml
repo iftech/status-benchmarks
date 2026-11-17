@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: status-bench-group
+  labels:
+    app.kubernetes.io/part-of: status-benchmarks
+    status-benchmarks-scenario: group
