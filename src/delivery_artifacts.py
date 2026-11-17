@@ -4,7 +4,7 @@ import csv
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 @contextmanager
@@ -22,6 +22,12 @@ def write_json_file(path: Path, value: Any) -> None:
     with _atomic_text_file(path) as output:
         json.dump(value, output, indent=2, sort_keys=True)
         output.write("\n")
+
+
+def write_jsonl_file(path: Path, records: Iterable[dict]) -> None:
+    with _atomic_text_file(path) as output:
+        for record in records:
+            output.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def build_delivery_summary(metrics: dict) -> dict:
@@ -122,12 +128,15 @@ def save_delivery_metrics(metrics: dict, output_dir: str, prefix: str) -> Path:
     metrics["summary_file"] = str(summary_path)
     metrics["artifacts"] = artifacts
     report = {key: value for key, value in metrics.items() if key not in {
-        "attempted_messages", "sent_messages", "delivery_latency_table",
+        "attempted_messages", "sent_messages", "delivery_latency_table", "delivery_trace",
     }}
     report["format_version"] = 3
     report["delivery_diagnostics"] = {key: value for key, value in diagnostics.items() if key not in {
         "missing_delivery_debug", "missing_deliveries_by_message", "send_failures_by_message",
     }}
+    if metrics.get("delivery_trace") is not None:
+        report["delivery_trace"] = {key: value for key, value in metrics["delivery_trace"].items()
+                                    if key not in {"deliveries", "uncorrelated_api_attempts"}}
     write_json_file(metrics_path, report)
     write_json_file(summary_path, build_delivery_summary(metrics))
     return metrics_path
