@@ -1,5 +1,8 @@
 """Plot typical delivery times and slow deliveries without hiding either population."""
 
+import argparse
+import csv
+import json
 import math
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -291,3 +294,57 @@ def _save_reliability_by_receiver_type(receiver_metrics: dict[str, dict[str, Any
     ax.legend()
     fig.tight_layout()
     _finish_plot(fig, filename)
+
+
+def regenerate_delivery_plots(metrics_file: str | Path, output_dir: str | Path | None = None) -> dict[str, str]:
+    """Replot saved CSV evidence; update only the detailed report's plot references."""
+    from src.delivery_artifacts import write_json_file
+
+    metrics_path = Path(metrics_file)
+    with metrics_path.open(encoding="utf-8") as source:
+        report = json.load(source)
+
+    def artifact_path(name: str) -> Path:
+        original = Path(report["artifacts"][name]["path"])
+        local = metrics_path.parent / original.name
+        return local if local.is_file() else original
+
+    with artifact_path("message_attempts").open(encoding="utf-8", newline="") as source:
+        messages = [{"key": row["message_key"], "sent_at": float(row["sent_at"])}
+                    for row in csv.DictReader(source)]
+    sent_at = {message["key"]: message["sent_at"] for message in messages}
+    receiver_types = {node: kind for kind in ("light", "relay")
+                      for node in report["scenario"][f"{kind}_members"]}
+    records = []
+    with artifact_path("deliveries").open(encoding="utf-8", newline="") as source:
+        for row in csv.DictReader(source):
+            if not row["received_at"] and not row["latency_seconds"]:
+                continue
+            if not row["received_at"] or not row["latency_seconds"]:
+                raise ValueError("Delivery CSV has an incomplete successful-delivery row")
+            records.append({
+                "latency_seconds": float(row["latency_seconds"]),
+                "sent_at": sent_at[row["message_key"]],
+                "receiver_type": receiver_types[row["receiver"]],
+            })
+    if len(records) != report["overall"]["successful_deliveries"]:
+        raise ValueError("Delivery CSV count does not match the metrics report")
+    scenario = report["scenario"]
+    prefix = metrics_path.stem.removesuffix("_metrics")
+    destination = output_dir if output_dir is not None else (
+        Path("plots") / (scenario.get("namespace") or "default") / ("group" if "group_id" in scenario else "private")
+    )
+    report["plots"] = generate_delivery_plots(
+        {**report, "attempted_messages": messages, "delivery_latency_table": records}, destination, prefix,
+    )
+    write_json_file(metrics_path, report)
+    return report["plots"]
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Regenerate delivery plots from a metrics JSON and its CSV files.")
+    parser.add_argument("metrics_file", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    arguments = parser.parse_args()
+    for plot_name, plot_path in regenerate_delivery_plots(arguments.metrics_file, arguments.output_dir).items():
+        print(f"{plot_name}: {plot_path}")
