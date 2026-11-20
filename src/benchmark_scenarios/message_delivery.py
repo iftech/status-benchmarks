@@ -392,7 +392,6 @@ def _out_of_order_pairs(
 def _missing_delivery_diagnostics(
         missing_pairs: set[DeliveryPair],
         sent_messages_by_key: dict[str, Any],
-        status_nodes: dict[str, StatusBackend],
 ) -> dict[str, Any]:
     missing_by_receiver: dict[str, int] = defaultdict(int)
     missing_by_sender: dict[str, int] = defaultdict(int)
@@ -411,7 +410,7 @@ def _missing_delivery_diagnostics(
         missing_by_receiver[receiver] += 1
         missing_by_sender[sent_message.sender] += 1
         missing_by_message[message_key] += 1
-        missing_details.append(_missing_delivery_detail(sent_message, receiver, status_nodes))
+        missing_details.append(_missing_delivery_detail(sent_message, receiver))
 
     return {
         "missing_deliveries_by_receiver": dict(sorted(missing_by_receiver.items())),
@@ -429,75 +428,18 @@ def _missing_delivery_diagnostics(
 def _missing_delivery_detail(
         sent_message: Any,
         receiver: str,
-        status_nodes: dict[str, StatusBackend],
 ) -> dict[str, Any]:
-    message_id = getattr(sent_message, "message_id", None)
-
+    """Identify an unobserved delivery without inferring uncollected signal events."""
     return {
         "message_key": sent_message.key,
-        "message_id": message_id,
+        "message_id": getattr(sent_message, "message_id", None),
         "sender": sent_message.sender,
         "sender_type": sent_message.sender_type,
         "receiver": receiver,
         "receiver_type": node_type(receiver),
         "sequence": sent_message.sequence,
-        "sender_envelope_sent": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.ENVELOPE_SENT,
-            message_id,
-        ),
-        "sender_envelope_expired": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.ENVELOPE_EXPIRED,
-            message_id,
-        ),
-        "sender_message_delivered": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.MESSAGE_DELIVERED,
-            message_id,
-        ),
-        "receiver_history_request_started_count": len(_recent_signals(
-            status_nodes,
-            receiver,
-            SignalType.HISTORY_REQUEST_STARTED,
-        )),
-        "receiver_history_request_completed_count": len(_recent_signals(
-            status_nodes,
-            receiver,
-            SignalType.HISTORY_REQUEST_COMPLETED,
-        )),
-        "receiver_local_notification_seen": _node_has_signal_containing(
-            status_nodes,
-            receiver,
-            SignalType.LOCAL_NOTIFICATIONS,
-            sent_message.text,
-        ),
     }
 
-
-def _node_has_signal_containing(
-        status_nodes: dict[str, StatusBackend],
-        node_name: str,
-        signal_type: SignalType,
-        token: str | None,
-) -> bool:
-    if not token:
-        return False
-    return any(token in str(signal) for signal in _recent_signals(status_nodes, node_name, signal_type))
-
-
-def _recent_signals(
-        status_nodes: dict[str, StatusBackend],
-        node_name: str,
-        signal_type: SignalType,
-) -> list[dict[str, Any]]:
-    queue = status_nodes[node_name].signal.signal_queues.get(signal_type.value)
-    if queue is None:
-        return []
-    return queue.all_signals() if hasattr(queue, "all_signals") else queue.recent()
 
 def _overall_metrics(
         sent_messages: list[Any],
@@ -718,7 +660,7 @@ def build_delivery_metrics(
         "delivery_latency_distribution": _latency_distribution(delivery_records),
         "delivery_latency_distribution_by_receiver_type": _latency_distribution_by_receiver_type(delivery_records),
         "delivery_latency_table": delivery_records,
-        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key, status_nodes),
+        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key),
         "delivery_order_measurement": {
             "basis": "first application signal emission timestamp, with one-second precision",
             "equal_timestamp_order": "unknown; response-array order is not used",
