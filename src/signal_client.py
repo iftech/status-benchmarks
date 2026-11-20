@@ -26,16 +26,21 @@ class BufferedQueue:
         self.queue = asyncio.Queue()
         self.buffer = deque(maxlen=max_size)
         self.messages = []
+        self.retain_pending = True
+        self.retain_recent = True
+        self.message_filter: Callable[[str], bool] | None = None
 
     async def put(self, item):
         if item.get("event") is not None and item.get("event").get("messages"):
             for message in item["event"]["messages"]:
                 text = message.get("text")
-                if text is not None:
+                if text is not None and (self.message_filter is None or self.message_filter(text)):
                     # The envelope timestamp is Unix seconds; message["timestamp"] is a different field.
                     self.messages.append((item["timestamp"], text))
-        self.buffer.append(item)
-        await self.queue.put(item)
+        if self.retain_recent:
+            self.buffer.append(item)
+        if self.retain_pending:
+            await self.queue.put(item)
 
     async def get(self):
         return await self.queue.get()
@@ -116,19 +121,46 @@ class AsyncSignalClient:
 
         logger.debug("Specified signal queues have been cleaned up.")
 
+    def start_delivery_recording(self, run_id: str) -> None:
+        """Keep matching benchmark receipts without unused signal payloads.
+
+        Call after setup: measurement signals have no queue consumers during sending.
+        Lifecycle signals retain their queues so logout can still await node.stopped.
+        """
+        measurement_signals = {
+            SignalType.MESSAGES_NEW.value, SignalType.MESSAGE_DELIVERED.value,
+            SignalType.ENVELOPE_SENT.value, SignalType.ENVELOPE_EXPIRED.value,
+            SignalType.LOCAL_NOTIFICATIONS.value,
+            SignalType.HISTORY_REQUEST_STARTED.value, SignalType.HISTORY_REQUEST_COMPLETED.value,
+        }
+        marker = f" | Run-{run_id} | "
+        for signal_type in measurement_signals:
+            queue = self.signal_queues.get(signal_type)
+            if queue is None:
+                continue
+            queue.retain_pending = False
+            queue.retain_recent = False
+            while not queue.queue.empty():
+                queue.queue.get_nowait()
+            queue.buffer.clear()
+            if signal_type != SignalType.MESSAGES_NEW.value and signal_type in self.await_signals:
+                self.await_signals.remove(signal_type)
+            if signal_type == SignalType.MESSAGES_NEW.value:
+                queue.message_filter = lambda text: text.startswith("MVDS-TEST | ") and marker in text
+
     async def on_message(self, signal: str):
         signal_data = json.loads(signal)
-        logger.trace(f"Received WebSocket message: {signal_data}")
+        logger.trace("Received WebSocket message: %s", signal_data)
 
         if LOG_SIGNALS_TO_FILE:
             pass  # TODO: write to file if needed
 
         signal_type = signal_data.get("type")
-        if signal_type in self.signal_queues:
+        if signal_type in self.await_signals:
             await self.signal_queues[signal_type].put(signal_data)
-            logger.trace(f"Queued signal: {signal_type}")
+            logger.trace("Queued signal: %s", signal_type)
         else:
-            logger.trace(f"Ignored signal not in await list: {signal_type}")
+            logger.trace("Ignored signal not in await list: %s", signal_type)
 
     async def wait_for_signal(self, signal_type: str, timeout: int = 20) -> dict:
         if signal_type not in self.signal_queues:

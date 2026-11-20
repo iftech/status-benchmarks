@@ -1,15 +1,17 @@
 # Python Imports
 import asyncio
 import logging
+import math
 import statistics
 import time
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 # Project Imports
 import src.logger
 from src.enums import SignalType
+from src.delivery_artifacts import save_delivery_metrics
 from src.status_backend import StatusBackend
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,74 @@ class DeliveryScan:
     delivery_counts: dict[DeliveryPair, int]
     first_delivery_at: dict[DeliveryPair, float]
     first_deliveries_by_receiver_sender: dict[tuple[str, str], list[tuple[float, int, int, str]]]
+
+
+@dataclass
+class SendCadence:
+    """Schedule sequential API calls on fixed monotonic deadlines."""
+
+    interval: float
+    start_at: float
+    missed_send_slots: int = field(default=0, init=False)
+    max_deadline_lateness_seconds: float = field(default=0.0, init=False)
+    _deadline: float = field(init=False, repr=False)
+    _last_started_at: float | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        if not math.isfinite(self.interval) or self.interval <= 0:
+            raise ValueError("Send interval must be a finite positive number")
+        if not math.isfinite(self.start_at):
+            raise ValueError("Schedule start must be finite")
+        self._deadline = self.start_at
+
+    def _skip_before(self, earliest: float) -> None:
+        skipped = max(0, math.ceil((earliest - self._deadline) / self.interval))
+        self._deadline += skipped * self.interval
+        self.missed_send_slots += skipped
+
+    async def wait_for_next(self) -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        lateness = max(0.0, now - self._deadline)
+        self.max_deadline_lateness_seconds = max(self.max_deadline_lateness_seconds, lateness)
+        # Allow ordinary timer jitter without skipping an entire send slot.
+        tolerance = min(0.05, self.interval * 0.05)
+        if self._last_started_at is not None and lateness > tolerance:
+            self._skip_before(now)
+        if self._deadline > now:
+            await asyncio.sleep(self._deadline - now)
+        now = loop.time()
+        if self._last_started_at is not None:
+            earliest = self._last_started_at + self.interval - tolerance
+            if now < earliest:
+                # A late wake-up must not cause the following sends to bunch up.
+                self._skip_before(earliest)
+                if self._deadline > now:
+                    await asyncio.sleep(self._deadline - now)
+                now = loop.time()
+        self.max_deadline_lateness_seconds = max(
+            self.max_deadline_lateness_seconds, max(0.0, now - self._deadline),
+        )
+        self._last_started_at = now
+        self._deadline += self.interval
+
+    def summary(self) -> dict[str, int | float]:
+        return {
+            "missed_send_slots": self.missed_send_slots,
+            "max_deadline_lateness_seconds": self.max_deadline_lateness_seconds,
+        }
+
+
+def build_send_cadence_summary(by_node: dict[str, dict[str, int | float]]) -> dict[str, Any]:
+    return {
+        "clock": "monotonic",
+        "overrun_policy": "skip missed time slots; preserve target message count",
+        "missed_send_slots": sum(node["missed_send_slots"] for node in by_node.values()),
+        "max_deadline_lateness_seconds": max(
+            (node["max_deadline_lateness_seconds"] for node in by_node.values()), default=0.0,
+        ),
+        "by_node": by_node,
+    }
 
 
 def node_type(node_name: str) -> str:
@@ -42,11 +112,18 @@ def calculate_stagger_between_senders(
     return delay_between_messages / sender_count
 
 
+def benchmark_message_text(run_id: str, node_name: str, sequence: int) -> str:
+    """Build a 100-character message while preserving its complete identifiers."""
+    prefix = f"MVDS-TEST | {node_name} | Seq-{sequence:06d} | Run-{run_id} | "
+    if len(prefix) > 100:
+        raise ValueError("Benchmark message identifiers exceed the 100-character limit")
+    body = "The quick brown fox jumps over the lazy dog. Reliability test message."
+    return (prefix + body)[:100]
+
+
 def private_message_text(run_id: str, node_name: str, sequence: int) -> str:
-    return (
-        f"MVDS-TEST | {node_name} | Seq-{sequence:06d} | Run-{run_id} | "
-        "The quick brown fox jumps over the lazy dog."
-    )
+    return benchmark_message_text(run_id, node_name, sequence)
+
 
 def extract_first_message_id(response: dict) -> str | None:
     messages = response.get("result", {}).get("messages", [])
@@ -262,6 +339,8 @@ def _delivery_records(
         sent_messages_by_key: dict[str, Any],
         first_delivery_at: dict[DeliveryPair, float],
         receiver_type_resolver: ReceiverTypeResolver,
+        delivery_counts: dict[DeliveryPair, int],
+        out_of_order_pairs: set[DeliveryPair],
 ) -> list[dict[str, Any]]:
     records = []
 
@@ -278,6 +357,8 @@ def _delivery_records(
             "sent_at": sent_message.sent_at,
             "received_at": received_at,
             "latency_seconds": max(0.0, received_at - sent_message.sent_at),
+            "duplicates": max(0, delivery_counts[(message_key, receiver)] - 1),
+            "out_of_order": (message_key, receiver) in out_of_order_pairs,
         })
 
     records.sort(key=lambda record: record["latency_seconds"])
@@ -287,14 +368,23 @@ def _delivery_records(
 def _out_of_order_pairs(
         first_deliveries_by_receiver_sender: dict[tuple[str, str], list[tuple[float, int, int, str]]],
 ) -> set[DeliveryPair]:
+    """Count inversions distinguishable by application emission timestamp.
+
+    messages.new arrays have no ordering contract, and their timestamps have
+    one-second precision. Equal timestamps cannot establish delivery order.
+    """
     out_of_order: set[DeliveryPair] = set()
 
     for (receiver, _), deliveries in first_deliveries_by_receiver_sender.items():
+        by_timestamp: dict[float, list[tuple[int, str]]] = defaultdict(list)
+        for received_at, _, sequence, message_key in deliveries:
+            by_timestamp[received_at].append((sequence, message_key))
         max_seen_sequence = -1
-        for _, _, sequence, message_key in sorted(deliveries):
-            if sequence < max_seen_sequence:
-                out_of_order.add((message_key, receiver))
-            max_seen_sequence = max(max_seen_sequence, sequence)
+        for _, batch in sorted(by_timestamp.items()):
+            for sequence, message_key in batch:
+                if sequence < max_seen_sequence:
+                    out_of_order.add((message_key, receiver))
+            max_seen_sequence = max(max_seen_sequence, max(sequence for sequence, _ in batch))
 
     return out_of_order
 
@@ -302,7 +392,6 @@ def _out_of_order_pairs(
 def _missing_delivery_diagnostics(
         missing_pairs: set[DeliveryPair],
         sent_messages_by_key: dict[str, Any],
-        status_nodes: dict[str, StatusBackend],
 ) -> dict[str, Any]:
     missing_by_receiver: dict[str, int] = defaultdict(int)
     missing_by_sender: dict[str, int] = defaultdict(int)
@@ -321,7 +410,7 @@ def _missing_delivery_diagnostics(
         missing_by_receiver[receiver] += 1
         missing_by_sender[sent_message.sender] += 1
         missing_by_message[message_key] += 1
-        missing_details.append(_missing_delivery_detail(sent_message, receiver, status_nodes))
+        missing_details.append(_missing_delivery_detail(sent_message, receiver))
 
     return {
         "missing_deliveries_by_receiver": dict(sorted(missing_by_receiver.items())),
@@ -339,75 +428,18 @@ def _missing_delivery_diagnostics(
 def _missing_delivery_detail(
         sent_message: Any,
         receiver: str,
-        status_nodes: dict[str, StatusBackend],
 ) -> dict[str, Any]:
-    message_id = getattr(sent_message, "message_id", None)
-
+    """Identify an unobserved delivery without inferring uncollected signal events."""
     return {
         "message_key": sent_message.key,
-        "message_id": message_id,
+        "message_id": getattr(sent_message, "message_id", None),
         "sender": sent_message.sender,
         "sender_type": sent_message.sender_type,
         "receiver": receiver,
         "receiver_type": node_type(receiver),
         "sequence": sent_message.sequence,
-        "sender_envelope_sent": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.ENVELOPE_SENT,
-            message_id,
-        ),
-        "sender_envelope_expired": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.ENVELOPE_EXPIRED,
-            message_id,
-        ),
-        "sender_message_delivered": _node_has_signal_containing(
-            status_nodes,
-            sent_message.sender,
-            SignalType.MESSAGE_DELIVERED,
-            message_id,
-        ),
-        "receiver_history_request_started_count": len(_recent_signals(
-            status_nodes,
-            receiver,
-            SignalType.HISTORY_REQUEST_STARTED,
-        )),
-        "receiver_history_request_completed_count": len(_recent_signals(
-            status_nodes,
-            receiver,
-            SignalType.HISTORY_REQUEST_COMPLETED,
-        )),
-        "receiver_local_notification_seen": _node_has_signal_containing(
-            status_nodes,
-            receiver,
-            SignalType.LOCAL_NOTIFICATIONS,
-            sent_message.text,
-        ),
     }
 
-
-def _node_has_signal_containing(
-        status_nodes: dict[str, StatusBackend],
-        node_name: str,
-        signal_type: SignalType,
-        token: str | None,
-) -> bool:
-    if not token:
-        return False
-    return any(token in str(signal) for signal in _recent_signals(status_nodes, node_name, signal_type))
-
-
-def _recent_signals(
-        status_nodes: dict[str, StatusBackend],
-        node_name: str,
-        signal_type: SignalType,
-) -> list[dict[str, Any]]:
-    queue = status_nodes[node_name].signal.signal_queues.get(signal_type.value)
-    if queue is None:
-        return []
-    return queue.recent()
 
 def _overall_metrics(
         sent_messages: list[Any],
@@ -602,6 +634,8 @@ def build_delivery_metrics(
         sent_messages_by_key,
         scan.first_delivery_at,
         receiver_type_resolver,
+        scan.delivery_counts,
+        out_of_order,
     )
 
     return {
@@ -626,6 +660,77 @@ def build_delivery_metrics(
         "delivery_latency_distribution": _latency_distribution(delivery_records),
         "delivery_latency_distribution_by_receiver_type": _latency_distribution_by_receiver_type(delivery_records),
         "delivery_latency_table": delivery_records,
-        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key, status_nodes),
-
+        "delivery_diagnostics": _missing_delivery_diagnostics(missing_pairs, sent_messages_by_key),
+        "delivery_order_measurement": {
+            "basis": "first application signal emission timestamp, with one-second precision",
+            "equal_timestamp_order": "unknown; response-array order is not used",
+            "limitation": "out_of_order_deliveries counts only inversions across distinct timestamps",
+        },
     }
+
+
+def _summarize_counts(counts: dict, limit: int = 5) -> str:
+    """Keep console output bounded even when many nodes or routes are affected."""
+    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    summary = ", ".join(f"{name}={count}" for name, count in items[:limit])
+    if len(items) > limit:
+        summary += f" (+{len(items) - limit} more)"
+    return summary or "none"
+
+
+def report_delivery_results(metrics: dict, label: str, output_dir: str, prefix: str) -> None:
+    """Save requirements and detailed reports with CSV evidence; log totals and problems."""
+    try:
+        save_delivery_metrics(metrics, output_dir, prefix)
+    except OSError as error:
+        metrics.pop("metrics_file", None)
+        metrics.pop("summary_file", None)
+        metrics["metrics_file_error"] = str(error)
+        logger.error("%s: cannot save metrics in %s: %s", label, output_dir, error)
+
+    overall = metrics["overall"]
+    has_delivery_issues = any(overall[key] for key in (
+        "send_failures", "lost_deliveries", "duplicate_deliveries", "out_of_order_deliveries",
+    ))
+    logger.log(
+        logging.WARNING if has_delivery_issues else logging.INFO,
+        "%s result: sends=%s/%s; deliveries=%s/%s; send_failures=%s; missing=%s; duplicates=%s; out_of_order=%s",
+        label, overall["messages_sent"], overall["messages_attempted"],
+        overall["successful_deliveries"], overall["expected_message_deliveries"],
+        overall["send_failures"], overall["lost_deliveries"],
+        overall["duplicate_deliveries"], overall["out_of_order_deliveries"],
+    )
+    diagnostics = metrics["delivery_diagnostics"]
+    cadence = metrics.get("send_cadence", {})
+    if cadence.get("missed_send_slots"):
+        logger.warning(
+            "%s send cadence: missed_slots=%s; max_deadline_lateness=%.3fs; nodes: %s",
+            label, cadence["missed_send_slots"], cadence["max_deadline_lateness_seconds"],
+            _summarize_counts({node: result["missed_send_slots"]
+                               for node, result in cadence["by_node"].items() if result["missed_send_slots"]}),
+        )
+    if overall["send_failures"]:
+        logger.warning("%s API send failures by sender: %s", label,
+                       _summarize_counts(diagnostics["send_failures_by_sender"]))
+    if overall["lost_deliveries"]:
+        logger.warning(
+            "%s missing deliveries at observation end (%s): receivers: %s; senders: %s",
+            label, metrics["observation"]["reason"],
+            _summarize_counts(diagnostics["missing_deliveries_by_receiver"]),
+            _summarize_counts(diagnostics["missing_deliveries_by_sender"]),
+        )
+
+    slow = [row for row in metrics["delivery_latency_table"] if row["latency_seconds"] > 10]
+    if slow:
+        logger.warning(
+            "%s: %s deliveries took over 10s (max=%.2fs); affected routes: %s",
+            label, len(slow), max(row["latency_seconds"] for row in slow),
+            _summarize_counts(Counter(f"{row['sender']} -> {row['receiver']}" for row in slow)),
+        )
+
+    if metrics.get("summary_file"):
+        logger.info("%s requirements summary: %s", label, metrics["summary_file"])
+    if metrics.get("metrics_file"):
+        logger.info("%s detailed metrics: %s", label, metrics["metrics_file"])
+        for name, artifact in metrics.get("artifacts", {}).items():
+            logger.info("%s %s: %s (%s records)", label, name, artifact["path"], artifact["records"])

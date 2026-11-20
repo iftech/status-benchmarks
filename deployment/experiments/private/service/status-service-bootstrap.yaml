@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: status-service-bootstrap
+  namespace: status-bench-private
+spec:
+  replicas: 1
+  podManagementPolicy: "Parallel"
+  serviceName: status-service-bootstrap
+  selector:
+    matchLabels:
+      app: status-service-bootstrap
+  template:
+    metadata:
+      labels:
+        app: status-service-bootstrap
+    spec:
+      dnsConfig:
+        searches:
+          - status-service-bootstrap.status-bench-private.svc.cluster.local
+      containers:
+        - name: waku
+          image: albertodst/nwaku:v0.39.0
+          imagePullPolicy: Always
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "curl -sf http://127.0.0.1:8008/health | grep -q 'OK'"
+            successThreshold: 3
+            initialDelaySeconds: 1
+            periodSeconds: 3
+            failureThreshold: 1
+            timeoutSeconds: 5
+          env:
+            - name: IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "768Mi"
+              cpu: "400m"
+          ports:
+            - containerPort: 8645
+            - containerPort: 8008
+          command:
+            - sh
+            - -c
+            - |
+              /usr/bin/logosdeliverynode --rest=true --rest-admin=true --rest-address=0.0.0.0 --peer-exchange=true --relay=false --max-connections=500 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --nat=extip:$IP --cluster-id=16 --shard=32 --shard=64

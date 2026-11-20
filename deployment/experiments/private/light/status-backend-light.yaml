@@ -1,0 +1,88 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: status-backend-light
+  namespace: status-bench-private
+spec:
+  replicas: 10
+  podManagementPolicy: Parallel
+  serviceName: status-backend-light
+  selector:
+    matchLabels:
+      app: status-backend-light
+  template:
+    metadata:
+      labels:
+        app: status-backend-light
+    spec:
+      serviceAccountName: controlbox-sa
+      dnsConfig:
+        searches:
+          - status-backend-relay.status-bench-private.svc.cluster.local
+          - status-backend-light.status-bench-private.svc.cluster.local
+          - status-service-bootstrap.status-bench-private.svc.cluster.local
+          - status-service-node.status-bench-private.svc.cluster.local
+      initContainers:
+      - name: getenr
+        image: soutullostatus/getenr:v1.1.0
+        imagePullPolicy: Always
+        volumeMounts:
+          - name: enr-data
+            mountPath: /etc/enr
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            /app/getenr.sh 3 status-service-bootstrap.status-bench-private /etc/enr/BOOT_ENRS && \
+            /app/getenr.sh 3 status-service-node.status-bench-private /etc/enr/STORE_ENRS
+      - name: config-init
+        image: soutullostatus/status-init:v1.1.0
+        imagePullPolicy: Always
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -a
+            source /etc/enr/BOOT_ENRS
+            source /etc/enr/STORE_ENRS
+            set +a
+            python /init_container.py
+        volumeMounts:
+        - name: enr-data
+          mountPath: /etc/enr
+        - name: relay-config
+          mountPath: /static/configs
+      containers:
+        - name: status-backend
+          image: albertodst/status-go:develop-df120fdb
+          imagePullPolicy: IfNotPresent
+          args: ["status-backend", "-address", "0.0.0.0:3333"]
+          env:
+            - name: STATUS_MESSAGE_TRACE
+              value: "1"
+          ports:
+            - containerPort: 3333
+              name: http
+            - containerPort: 30303
+              name: waku
+          volumeMounts:
+            - mountPath: "/static/configs"
+              name: relay-config
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -X GET http://localhost:3333/health || exit 1
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 120
+        - name: status-subscriber
+          image: soutullostatus/status-subscriber:v1.0.0
+      volumes:
+        - name: relay-config
+          emptyDir: {}
+        - name: enr-data
+          emptyDir: {}

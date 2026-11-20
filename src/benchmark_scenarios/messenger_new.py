@@ -1,6 +1,5 @@
 # Python Imports
 import asyncio
-import json
 import logging
 import time
 from dataclasses import asdict, dataclass, replace
@@ -9,13 +8,17 @@ from typing import Any
 # Project Imports
 import src.logger
 from src.benchmark_scenarios.message_delivery import (
+    SendCadence,
+    benchmark_message_text,
     build_delivery_metrics,
+    build_send_cadence_summary,
     calculate_stagger_between_senders,
     extract_first_message_id,
     expected_group_delivery_pairs,
     group_delivery_pair,
     group_receiver_type,
     node_type,
+    report_delivery_results,
     wait_for_delivery_progress,
 )
 from src.benchmark_scenarios.scenario_utils import (
@@ -60,12 +63,16 @@ async def _send_member_messages(
         initial_delay: float,
         sent_messages: list[SentGroupMessage],
         sent_messages_lock: asyncio.Lock,
-) -> None:
-    if initial_delay:
-        await asyncio.sleep(initial_delay)
+        schedule_start: float | None = None,
+) -> tuple[str, dict[str, int | float]]:
+    loop = asyncio.get_running_loop()
+    cadence = SendCadence(
+        delay_between_messages, (loop.time() if schedule_start is None else schedule_start) + initial_delay,
+    )
 
     for sequence in range(num_messages):
-        text = f"GroupBenchmark|run={run_id}|sender={node_name}|seq={sequence}"
+        await cadence.wait_for_next()
+        text = benchmark_message_text(run_id, node_name, sequence)
         async with sent_messages_lock:
             send_order = len(sent_messages)
             message = SentGroupMessage(
@@ -94,21 +101,21 @@ async def _send_member_messages(
             if sequence == 0:
                 logger.info(f"{node_name} successfully began sending {num_messages} group messages")
 
-        if sequence < num_messages - 1:
-            await asyncio.sleep(delay_between_messages)
-
     logger.info(f"{node_name} finished sending group messages")
+    return node_name, cadence.summary()
 
 
 async def send_group_message_new(
         consumers: int = 4,
         num_messages: int = 3,
-        delay_between_messages: float = 60,
+        delay_between_messages: float = 5,
         settle_time: int = 120,
         max_delivery_wait: int = 240,
         quiet_time: int = 30,
         poll_interval: float = 5,
         plots_output_dir: str | None = "plots",
+        namespace: str = "status-go-test",
+        results_output_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Run a 20-member private group benchmark with 10 relay and 10 light nodes.
@@ -119,11 +126,11 @@ async def send_group_message_new(
     Sender start times are staggered across the cadence window instead of synchronized.
     """
     # 20-member private group: 10 relay nodes and 10 light nodes.
-    # Every member sends one message every 60 seconds for 3 minutes.
+    # Send starts follow fixed deadlines; response time is included in the interval.
     status_nodes: dict[str, StatusBackend] = {}
 
     try:
-        initialized_nodes = await initialize_relay_light_nodes(relay_count=10, light_count=10)
+        initialized_nodes = await initialize_relay_light_nodes(relay_count=10, light_count=10, namespace=namespace)
         status_nodes = initialized_nodes.status_nodes
         relay_members = initialized_nodes.relay_members
         light_members = initialized_nodes.light_members
@@ -154,6 +161,8 @@ async def send_group_message_new(
             node.signal.cleanup_signal_queues()
 
         run_id = str(int(time.time() * 1000))
+        for node in status_nodes.values():
+            node.signal.start_delivery_recording(run_id)
         sent_messages: list[SentGroupMessage] = []
         sent_messages_lock = asyncio.Lock()
         initial_delay_step = calculate_stagger_between_senders(
@@ -163,7 +172,8 @@ async def send_group_message_new(
         )
         configured_send_duration = num_messages * delay_between_messages
 
-        await asyncio.gather(*[
+        schedule_start = asyncio.get_running_loop().time()
+        cadence_by_node = dict(await asyncio.gather(*[
             _send_member_messages(
                 member,
                 status_nodes[member],
@@ -174,9 +184,10 @@ async def send_group_message_new(
                 member_index * initial_delay_step,
                 sent_messages,
                 sent_messages_lock,
+                schedule_start=schedule_start,
             )
             for member_index, member in enumerate(group_members)
-        ])
+        ]))
 
         logger.info(
             "Waiting for group deliveries: min=%ss max=%ss quiet=%ss",
@@ -207,8 +218,13 @@ async def send_group_message_new(
             group_receiver_type,
         )
         metrics["observation"] = observation
+        metrics["send_cadence"] = build_send_cadence_summary(cadence_by_node)
         metrics["scenario"] = {
+            "run_id": run_id,
+            "namespace": namespace,
             "name": "20-member group chat, half relay half light",
+            "message_length_characters": 100,
+            "message_template": "MVDS-TEST | <sender> | Seq-<sequence:06d> | Run-<run_id> | deterministic text",
             "group_id": group_id,
             "members": group_members,
             "relay_members": relay_members,
@@ -237,7 +253,10 @@ async def send_group_message_new(
                 metrics["plots_error"] = str(e)
                 logger.error(f"Failed to generate group delivery plots: {e}")
 
-        logger.info("Group chat delivery metrics:\n%s", json.dumps(metrics, indent=2, sort_keys=True))
+        report_delivery_results(
+            metrics, "Group chat", output_dir=results_output_dir or "logs/delivery-results",
+            prefix=f"group_{run_id}",
+        )
         return metrics
     finally:
         await shutdown_status_nodes(status_nodes)
