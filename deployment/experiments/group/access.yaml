@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controlbox-sa
+  namespace: status-bench-group
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: statefulset-viewer
+  namespace: status-bench-group
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: controlbox-statefulset-viewer
+  namespace: status-bench-group
+subjects:
+  - kind: ServiceAccount
+    name: controlbox-sa
+    namespace: status-go-test
+  - kind: ServiceAccount
+    name: controlbox-sa
+    namespace: status-bench-group
+roleRef:
+  kind: Role
+  name: statefulset-viewer
+  apiGroup: rbac.authorization.k8s.io
