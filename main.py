@@ -40,6 +40,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--interval", type=positive_float,
                         help="Seconds between send starts; defaults to 60 for group or 30 for private.")
     parser.add_argument("--output-dir", help="Defaults to logs/delivery-results/<namespace>.")
+    parser.add_argument("--trace-output-dir", metavar="PATH",
+                        help="Enable diagnostic tracing and save reports in PATH (disabled by default); "
+                             "requires an instrumented backend with STATUS_MESSAGE_TRACE=1.")
     parser.add_argument("--no-plots", action="store_true", help="Skip plot generation.")
     return parser.parse_args(argv)
 
@@ -60,6 +63,7 @@ async def run_scenario(args: argparse.Namespace) -> dict:
         namespace=namespace,
         results_output_dir=str(output_dir),
         plots_output_dir=plots_dir,
+        trace_output_dir=args.trace_output_dir,
     )
 
 

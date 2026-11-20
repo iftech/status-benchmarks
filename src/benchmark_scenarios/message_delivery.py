@@ -728,6 +728,107 @@ def report_delivery_results(metrics: dict, label: str, output_dir: str, prefix: 
             _summarize_counts(Counter(f"{row['sender']} -> {row['receiver']}" for row in slow)),
         )
 
+    trace = metrics.get("delivery_trace")
+    if trace is not None:
+        retry_summary = trace.get("publication_retry_summary", {})
+        if retry_summary.get("scheduled_retries"):
+            logger.info(
+                "%s LightPush retries: scheduled=%s; recovered_publications=%s; failed_after_retry=%s",
+                label, retry_summary["scheduled_retries"], retry_summary["recovered_publications"],
+                retry_summary["failed_publications_after_retry"],
+            )
+        stream_issues = defaultdict(list)
+        for node, stream in sorted(trace["collection"].items()):
+            if stream["status"] != "collected":
+                stream_issues[stream["status"]].append(node)
+        for status, nodes in sorted(stream_issues.items()):
+            names = ", ".join(nodes[:5])
+            if len(nodes) > 5:
+                names += f" (+{len(nodes) - 5} more)"
+            logger.warning("%s diagnostics %s on %s node(s): %s; inspect collection in the trace report",
+                           label, status, len(nodes), names)
+        if "unavailable" in stream_issues:
+            logger.warning("%s: verify the deployed status-go image supports message.trace and STATUS_MESSAGE_TRACE=1",
+                           label)
+
+        findings = defaultdict(Counter)
+        filter_summary = trace.get("filter_summary", {})
+        for reason, nodes in sorted(filter_summary.get("client_rejections_by_reason", {}).items()):
+            logger.warning("%s Filter client rejection: %s; events=%s; nodes: %s",
+                           label, reason, sum(nodes.values()), _summarize_counts(nodes))
+        if filter_summary.get("push_failures_by_relay"):
+            logger.warning("%s Filter push failures by relay: %s", label,
+                           _summarize_counts(filter_summary["push_failures_by_relay"]))
+        ack_summary = trace.get("mvds_ack_summary", {})
+        schedule_summary = trace.get("mvds_schedule_summary", {})
+        schedule_nodes = schedule_summary.get("nodes_with_schedule_tracing", [])
+        unavailable_schedule_nodes = sorted(set(trace["collection"]) - set(schedule_nodes))
+        if unavailable_schedule_nodes:
+            logger.info("%s MVDS scheduling tracing unavailable on %s node(s): %s; deploy trace version 4",
+                        label, len(unavailable_schedule_nodes), ", ".join(unavailable_schedule_nodes[:5]))
+        if schedule_summary.get("supported"):
+            online = schedule_summary.get("peer_online_notifications_by_reason", {})
+            logger.info("%s MVDS scheduling: online_notifications=%s; online_refreshes_ignored=%s; stale_online_notifications=%s; reset_operations=%s; reset_states=%s",
+                        label, sum(online.get("queued", {}).values()),
+                        sum(online.get("already_online", {}).values()), sum(online.get("stale_event", {}).values()),
+                        sum(schedule_summary.get("reset_operations_by_node", {}).values()),
+                        sum(schedule_summary.get("reset_state_observations_by_node", {}).values()))
+            for nodes, description in (
+                    (online.get("queue_full", {}), "MVDS online notification queue drops"),
+                    (schedule_summary.get("operation_failures_by_node", {}), "MVDS scheduling operation failures")):
+                if nodes:
+                    logger.warning("%s %s: %s", label, description, _summarize_counts(nodes))
+        if ack_summary.get("repeated_message_recipient_pairs"):
+            unavailable_filter_nodes = sorted(set(trace["collection"]) - set(filter_summary.get("nodes_with_filter_tracing", [])))
+            if unavailable_filter_nodes:
+                logger.info("%s Filter tracing unavailable on %s node(s): %s; rebuild both roles with trace version 3",
+                            label, len(unavailable_filter_nodes), ", ".join(unavailable_filter_nodes[:5]))
+        if ack_summary.get("supported"):
+            for key, description in (("queue_drops_by_node", "MVDS input queue drops"),
+                                     ("queue_skips_by_node", "MVDS input packets skipped"),
+                                     ("state_remove_errors_by_node", "MVDS pending-state removal errors")):
+                if ack_summary.get(key):
+                    logger.warning("%s %s: %s", label, description, _summarize_counts(ack_summary[key]))
+        elif ack_summary.get("repeated_message_recipient_pairs"):
+            logger.info("%s: ACK tracing unavailable; rebuild status-go with MVDS ACK instrumentation", label)
+        for row in trace["deliveries"]:
+            classification = row["classification"]
+            route = f"{row['sender']} -> {row['receiver']}"
+            if classification != "delivery_observed":
+                findings[classification][route] += 1
+            elif row["failed_send_attempts_observed"]:
+                findings["send_attempt_errors_before_delivery"][route] += 1
+            ack_trace = row.get("ack_trace", {})
+            for finding in row.get("mvds_schedule", {}).get("findings", []):
+                findings["mvds_schedule: " + finding][route] += 1
+            if row["mvds_retry_candidate"] and ack_trace.get("supported"):
+                findings[f"mvds_retry: {ack_trace['status_before_first_retry']}"][route] += 1
+            elif row["mvds_retry_candidate"] and ack_summary.get("supported"):
+                findings["mvds_retry: ack_trace_unavailable"][route] += 1
+            filter_findings = set()
+            if row["attempts"]:
+                for envelope in row["attempts"][0]["envelopes"]:
+                    evidence = envelope.get("filter_trace", {})
+                    if evidence.get("supported") and evidence.get("applicable") and evidence.get("status") != "receive_hook_observed":
+                        filter_findings.add("data_filter: " + evidence["status"])
+            for message in ack_trace.get("messages", []):
+                if not message["before_retries"]:
+                    continue
+                for publication in message["before_retries"][0].get("ack_publications", []):
+                    for envelope in publication["envelopes"]:
+                        evidence = envelope.get("filter_trace", {})
+                        if evidence.get("supported") and evidence.get("applicable") and evidence.get("status") != "receive_hook_observed":
+                            filter_findings.add("ack_filter: " + evidence["status"])
+            for classification in filter_findings:
+                findings[classification][route] += 1
+        for classification, routes in sorted(findings.items()):
+            logger.warning("%s diagnostic finding: %s; message/recipient pairs=%s; affected routes: %s",
+                           label, classification, sum(routes.values()), _summarize_counts(routes))
+        if not trace.get("artifact_error") and trace.get("report_file"):
+            logger.info("%s trace report: %s", label, trace["report_file"])
+            if trace.get("events_file"):
+                logger.info("%s trace events: %s", label, trace["events_file"])
+
     if metrics.get("summary_file"):
         logger.info("%s requirements summary: %s", label, metrics["summary_file"])
     if metrics.get("metrics_file"):

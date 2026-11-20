@@ -2,6 +2,27 @@
 
 Deployment files that will be used for the deployments in the experiments.
 
+## Enable delivery tracing from the CLI
+
+Tracing is disabled by default. To collect diagnostic events, deploy a backend
+image supporting `message.trace` with `STATUS_MESSAGE_TRACE=1` on the Status nodes,
+then pass `--trace-output-dir PATH` to the benchmark runner. For example, from the
+repository root inside controlbox:
+
+```sh
+/home/venv/bin/python main.py --scenario group --num-messages 3 \
+  --trace-output-dir logs/delivery-traces/status-bench-group
+
+/home/venv/bin/python main.py --scenario private --num-messages 3 \
+  --trace-output-dir logs/delivery-traces/status-bench-private
+```
+
+The option enables diagnostic signal retention and trace reports for either
+scenario. Without it, the runner passes `None` and tracing stays disabled.
+Standard metrics, summaries and CSV files still use `--output-dir`, which defaults
+to `logs/delivery-results/<namespace>/`. Tracing retains detailed signal histories,
+so use short diagnostic runs when investigating a delivery issue.
+
 ## light
 [Definition](https://www.notion.so/Chat-Protocol-Benchmarks-1938f96fb65c80d8b22fdf641c5ff003?source=copy_link#1998f96fb65c802095e6fc894dc0b4fe)
 

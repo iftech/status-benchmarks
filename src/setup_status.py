@@ -32,6 +32,7 @@ async def initialize_nodes_application(pod_names: list[str], wakuV2LightClient=F
                     SignalType.MESSAGE_DELIVERED.value,
                     SignalType.ENVELOPE_SENT.value,
                     SignalType.ENVELOPE_EXPIRED.value,
+                    SignalType.MESSAGE_TRACE.value,
                     SignalType.HISTORY_REQUEST_STARTED.value,
                     SignalType.HISTORY_REQUEST_COMPLETED.value,
                     SignalType.LOCAL_NOTIFICATIONS.value,
